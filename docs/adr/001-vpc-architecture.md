@@ -38,34 +38,20 @@ Key requirements:
 ## Options Considered
 
 ### Option A: Single public subnet (flat network)
-Put everything — ALB, EKS nodes, RDS — in one public subnet.
-
 - **Pros:** Simple, cheap (no NAT Gateway cost), easy to debug
 - **Cons:** RDS and worker nodes are internet-exposed. Fails every security audit.
-  Not acceptable for any real workload.
 
 ### Option B: Public + private subnets, single AZ
-One public subnet for ALB, one private subnet for everything else, in a single AZ.
-
 - **Pros:** Proper public/private separation, cheapest option
-- **Cons:** Single AZ = single point of failure. EKS will warn about this.
-  Not a credible portfolio design — shows you don't understand HA.
+- **Cons:** Single AZ = single point of failure. EKS will warn about this. Not a credible HA design.
 
 ### Option C: Public + private subnets, 3 AZs, single NAT GW in dev ✅ CHOSEN
-3 public + 3 private subnets across 3 AZs. Single NAT Gateway in dev to save cost,
-3 NAT Gateways in prod for AZ-fault tolerance.
-
-- **Pros:** Real HA layout, security best practices, mirrors how production VPCs are built,
-  cost-optimized for dev
-- **Cons:** Single NAT GW in dev is a minor HA risk (if that AZ goes down, private subnets
-  lose outbound internet). Acceptable for non-production.
+- **Pros:** Real HA layout, security best practices, mirrors production VPC design, cost-optimized for dev
+- **Cons:** Single NAT GW in dev is a minor HA risk — if that AZ goes down, private subnets lose outbound internet. Acceptable for non-production.
 
 ### Option D: Public + private subnets, 3 AZs, 3 NAT Gateways everywhere
-Same as Option C but HA NAT Gateways in all environments.
-
 - **Pros:** Full HA even in dev
-- **Cons:** 3 NAT Gateways = ~$96/month extra cost for a portfolio project with no real users.
-  Not worth it for dev.
+- **Cons:** ~$96/month extra cost for a portfolio environment with no real users. Not justified.
 
 ---
 
