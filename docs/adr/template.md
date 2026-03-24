@@ -56,7 +56,7 @@ What were the deciding factors?
 
 ## Implementation Notes
 
-Any specific details about how this decision will be implemented.
+File locations, module structure, environment-specific variations, critical configuration values, or code snippets that are non-obvious from the decision alone.
 
 ---
 
