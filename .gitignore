@@ -1,0 +1,22 @@
+# Local environment — never commit real credentials
+.env
+.env.local
+
+# Terraform state and secrets
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl
+
+# Build artifacts
+services/product-api/product-api
+services/storefront/.next/
+services/storefront/out/
+services/storefront/node_modules/
+services/order-worker/__pycache__/
+services/order-worker/*.pyc
+
+# OS
+.DS_Store
