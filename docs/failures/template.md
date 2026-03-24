@@ -3,7 +3,7 @@
 **Date:** YYYY-MM-DD
 **Severity:** P1 (Critical) | P2 (High) | P3 (Medium) | P4 (Low)
 **Duration:** Xh Ym
-**Services Affected:** [list services]
+**Services Affected:** [internal service names + customer-facing impact, e.g. "product-api, storefront — checkout unavailable"]
 **Author:** [name]
 
 ---
@@ -73,13 +73,9 @@ Step-by-step what was done to resolve the issue.
 
 ---
 
-## Lessons Learned
+## Lessons & Prevention
 
-What did we learn? What would we do differently?
-What assumptions were wrong?
+**What we learned:** What was surprising? What assumptions were wrong?
 
----
-
-## Prevention
-
-What specific changes will prevent this class of failure in the future?
+**What changes now:** Specific, concrete actions that prevent this class of failure.
+(Vague answers like "be more careful" are not acceptable here.)
