@@ -18,7 +18,7 @@ Key requirements:
 - Internet-facing traffic must only enter via the ALB — no direct node exposure
 - RDS and ElastiCache must never be reachable from the internet
 - We need outbound internet access from private subnets (to pull container images, call AWS APIs)
-- Cost must be reasonable for a dev/portfolio environment
+- Cost must be reasonable for a dev environment
 
 ---
 
@@ -51,7 +51,7 @@ Key requirements:
 
 ### Option D: Public + private subnets, 3 AZs, 3 NAT Gateways everywhere
 - **Pros:** Full HA even in dev
-- **Cons:** ~$96/month extra cost for a portfolio environment with no real users. Not justified.
+- **Cons:** ~$96/month extra cost for dev with no HA benefit over Option C. Not justified.
 
 ---
 
@@ -69,7 +69,7 @@ The public/private split is non-negotiable for security:
 The 3-AZ layout is required because:
 - EKS managed node groups need multi-AZ to properly spread pods
 - RDS Multi-AZ standby needs to be in a different AZ than the primary
-- A real HA system can survive an AZ failure — this proves the design is production-intent
+- The system must survive an AZ failure without operator intervention
 
 The single NAT GW in dev saves ~$64/month (NAT GW is $0.045/hr + data processing charges).
 The risk is acceptable: if AZ-a goes down in dev, nodes in AZ-b and AZ-c lose outbound internet
@@ -92,8 +92,7 @@ until we notice and fix it. In prod, that's unacceptable — so we use 3.
 - NAT GW single point of failure in dev (accepted risk)
 
 ### Risks
-- Subnet exhaustion: /24 subnets give 251 usable IPs each. If we ever need >251 pods
-  per AZ in a single subnet, we'd need to expand. Unlikely for this project.
+- Subnet exhaustion: /24 subnets give 251 usable IPs each. If pod density exceeds 251 per AZ per subnet, expansion requires re-IP or additional subnets.
 - CIDR conflicts: 10.0.0.0/16 could conflict with on-prem networks if VPN/Direct Connect
   is added later. Document this as a known limitation.
 
