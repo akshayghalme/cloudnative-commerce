@@ -1,0 +1,14 @@
+# Git
+.git
+.gitignore
+
+# Tests and docs
+*_test.go
+*.md
+
+# Local dev
+.env
+.env.*
+
+# Build artifacts
+product-api
