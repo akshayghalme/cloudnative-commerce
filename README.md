@@ -29,7 +29,7 @@ Manages the full lifecycle from provisioning to observability to chaos resilienc
 
 ## Infrastructure Overview
 
-- **AWS region:** us-east-1, 3 AZs
+- **AWS region:** ap-south-1 (Mumbai), 3 AZs
 - **Networking:** VPC with public/private subnet split — ALB in public, EKS nodes + RDS + Redis in private
 - **EKS:** Managed node groups, IRSA for pod-level IAM, Karpenter for node autoscaling
 - **Data:** RDS PostgreSQL (Multi-AZ), ElastiCache Redis, automated backups
