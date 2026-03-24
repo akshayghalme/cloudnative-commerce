@@ -1,0 +1,106 @@
+name: cloudnative-commerce
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16.3-alpine3.19
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./services/product-api/db/migrations:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine3.19
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── ElasticMQ (local SQS emulator) ─────────────────────────────────────────
+  # Lets the order-worker run locally without real AWS credentials.
+  # API is SQS-compatible — boto3 talks to it with no code changes.
+  elasticmq:
+    image: softwaremill/elasticmq-native:1.5.7
+    restart: unless-stopped
+    volumes:
+      - ./elasticmq.conf:/opt/elasticmq.conf:ro
+    ports:
+      - "9324:9324"   # SQS API
+      - "9325:9325"   # UI
+
+  # ── Product API (Go) ────────────────────────────────────────────────────────
+  product-api:
+    build:
+      context: ./services/product-api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Storefront (Next.js → nginx) ────────────────────────────────────────────
+  storefront:
+    build:
+      context: ./services/storefront
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      product-api:
+        condition: service_healthy
+
+  # ── Order Worker (Python) ───────────────────────────────────────────────────
+  order-worker:
+    build:
+      context: ./services/order-worker
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SQS_QUEUE_URL: http://elasticmq:9324/000000000000/orders
+      # Override AWS credentials for ElasticMQ (accepts any non-empty values)
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticmq:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  redis_data:
