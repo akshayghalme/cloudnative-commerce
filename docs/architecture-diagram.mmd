@@ -1,99 +1,94 @@
-%%{init: {'theme': 'default', 'themeVariables': { 'fontSize': '14px', 'primaryColor': '#e3f2fd', 'primaryBorderColor': '#1565c0', 'primaryTextColor': '#1a1a1a', 'lineColor': '#1565c0', 'secondaryColor': '#fff3e0', 'tertiaryColor': '#e8f5e9' }}}%%
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '18px', 'fontFamily': 'arial', 'primaryColor': '#dbeafe', 'primaryBorderColor': '#2563eb', 'primaryTextColor': '#111', 'lineColor': '#475569' }, 'flowchart': { 'nodeSpacing': 40, 'rankSpacing': 60, 'curve': 'basis', 'padding': 20 }}}%%
 
 graph TB
-    USER(["👤 Users — HTTPS"])
-    DEV(["👨‍💻 Developer — git push"])
+    U(["👤 Users — HTTPS"]) --> NLB
+    D(["👨‍💻 Developer — git push"]) --> GH
 
-    subgraph GH["<b>GitHub Actions — CI/CD</b>"]
-        CI["<b>CI Pipeline</b><br/>Lint → Test → Build → Push"]
-        SCAN["<b>Security Scan</b><br/>Trivy · Checkov · Semgrep"]
-        SIGN["<b>Sign + SBOM</b><br/>Cosign · Syft"]
+    subgraph CICD["<b>CI/CD — GitHub Actions</b>"]
+        GH["GitHub Actions"] --> LINT["Lint · Test · Build"]
+        LINT --> SCAN["Trivy · Checkov · Semgrep"]
+        SCAN --> SIGN["Cosign Sign · Syft SBOM"]
+        SIGN -->|push signed image| ECR["ECR Registry"]
     end
 
-    subgraph AWS["<b>AWS — VPC 10.0.0.0/16 — ap-south-1 — 3 AZs</b>"]
-        NLB["<b>NLB</b><br/>Network Load Balancer"]
+    subgraph CLOUD["<b>AWS — ap-south-1 — VPC 10.0.0.0/16 — 3 AZs</b>"]
+        NLB["NLB"] --> NGINX["ingress-nginx + TLS"]
 
         subgraph EKS["<b>EKS Cluster</b>"]
-            INGRESS["<b>ingress-nginx</b><br/>TLS Termination"]
+            NGINX --> API["<b>product-api</b><br/>Go · REST · :8080"]
+            NGINX --> WEB["<b>storefront</b><br/>Next.js · SSR · :3000"]
+            WEB -.->|API calls| API
 
-            subgraph GITOPS["<b>Platform — GitOps + Security</b>"]
-                ARGO["<b>ArgoCD</b><br/>ApplicationSet · 9 Apps"]
-                KYVERNO["<b>Kyverno</b><br/>Image Signatures + 5 Policies"]
-                KARPENTER["<b>Karpenter</b><br/>Spot + On-Demand Nodes"]
-                CERTMGR["<b>cert-manager</b><br/>Let's Encrypt TLS"]
-                EXTSEC["<b>External Secrets</b><br/>AWS SM → K8s Secrets"]
+            WORKER["<b>order-worker</b><br/>Python · SQS Consumer"]
+
+            subgraph PLAT["<b>Platform</b>"]
+                ARGO["ArgoCD — 9 Apps"]
+                KYVERNO["Kyverno — 5 Policies"]
+                KARPENTER["Karpenter — Spot + OD"]
+                CERTMGR["cert-manager"]
+                EXTSEC["External Secrets"]
             end
 
-            subgraph SERVICES["<b>Commerce Services</b>"]
-                API["<b>product-api</b><br/>Go · REST · :8080"]
-                WEB["<b>storefront</b><br/>Next.js · SSR · :3000"]
-                WORKER["<b>order-worker</b><br/>Python · SQS Consumer"]
-            end
-
-            subgraph MON["<b>Observability — Metrics · Logs · Traces</b>"]
-                PROM["<b>Prometheus</b><br/>Metrics · SLO Rules · 15d"]
-                GRAFANA["<b>Grafana</b><br/>Golden Signals · Cluster · Cost"]
-                LOKI["<b>Loki + Promtail</b><br/>Log Aggregation · 14d"]
-                OTEL["<b>OTel → Tempo</b><br/>Distributed Traces · 7d"]
-                AM["<b>Alertmanager</b><br/>Burn-Rate Alerts"]
+            subgraph OBSV["<b>Observability</b>"]
+                PROM["Prometheus — Metrics · SLOs"]
+                GRAFANA["Grafana — 3 Dashboards"]
+                LOKI["Loki — Logs · 14d"]
+                TEMPO["OTel → Tempo — Traces · 7d"]
+                ALERTMGR["Alertmanager — Burn-Rate"]
             end
         end
 
-        subgraph DATA["<b>Data Layer — Private Subnets</b>"]
-            RDS[("<b>RDS PostgreSQL</b><br/>db.t4g.micro")]
-            REDIS[("<b>ElastiCache Redis</b><br/>cache.t4g.micro")]
+        subgraph DATASTORE["<b>Data — Private Subnets</b>"]
+            RDS[("PostgreSQL — RDS")]
+            REDIS[("Redis — ElastiCache")]
+            SQS["SQS — Order Queue"]
         end
 
-        ECR["<b>ECR</b><br/>3 Image Repos"]
-        SQS["<b>SQS</b><br/>Order Queue"]
-        SM["<b>Secrets Manager</b>"]
-        S3["<b>S3</b><br/>Terraform State"]
+        SM["Secrets Manager"]
+        S3["S3 — TF State"]
     end
 
     NOTIFY(["🔔 Slack + PagerDuty"])
 
-    %% User traffic
-    USER --> NLB --> INGRESS
-    INGRESS --> API
-    INGRESS --> WEB
-    WEB -.->|SSR API calls| API
-
-    %% CI/CD
-    DEV --> GH
-    CI -->|Push image| ECR
-    SIGN -->|Signed image| ECR
-
-    %% GitOps
-    ARGO -->|Sync from Git| SERVICES
-    KYVERNO -.->|Verify sigs| ECR
-
     %% Data flow
     API --> RDS
     API --> REDIS
-    API -->|Publish orders| SQS
-    WORKER -->|Poll orders| SQS
+    API -->|publish| SQS
+    WORKER -->|poll| SQS
     WORKER --> RDS
 
-    %% Platform
+    %% GitOps
+    ARGO -->|sync| API
+    ARGO -->|sync| WEB
+    ARGO -->|sync| WORKER
+    KYVERNO -.->|verify sigs| ECR
     EXTSEC -.-> SM
-    CERTMGR -.-> INGRESS
 
     %% Observability
-    SERVICES -.->|Metrics + Traces| OTEL
-    OTEL --> PROM
+    API -.-> PROM
+    WEB -.-> PROM
+    WORKER -.-> PROM
+    API -.-> TEMPO
     PROM --> GRAFANA
     LOKI --> GRAFANA
-    OTEL -.-> GRAFANA
-    PROM --> AM --> NOTIFY
+    TEMPO --> GRAFANA
+    PROM --> ALERTMGR --> NOTIFY
 
     %% Terraform
-    GH -.->|Terraform Plan/Apply| S3
+    GH -.->|terraform| S3
 
     %% Styles
-    style AWS fill:#f5f5f5,stroke:#ff9800,stroke-width:2px,color:#1a1a1a
-    style EKS fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#1a1a1a
-    style GITOPS fill:#e8eaf6,stroke:#3949ab,stroke-width:1px,color:#1a1a1a
-    style SERVICES fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px,color:#1a1a1a
-    style MON fill:#fff3e0,stroke:#e65100,stroke-width:1px,color:#1a1a1a
-    style DATA fill:#fce4ec,stroke:#c62828,stroke-width:1px,color:#1a1a1a
-    style GH fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px,color:#1a1a1a
+    style CICD fill:#f3e8ff,stroke:#7c3aed,stroke-width:2px
+    style CLOUD fill:#f0f9ff,stroke:#0284c7,stroke-width:2px
+    style EKS fill:#dbeafe,stroke:#2563eb,stroke-width:2px
+    style PLAT fill:#e0e7ff,stroke:#4338ca,stroke-width:1px
+    style OBSV fill:#fef3c7,stroke:#d97706,stroke-width:1px
+    style DATASTORE fill:#fee2e2,stroke:#dc2626,stroke-width:1px
+
+    style API fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#111
+    style WEB fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#111
+    style WORKER fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#111
+    style ECR fill:#fff7ed,stroke:#ea580c,stroke-width:2px,color:#111
+    style NOTIFY fill:#fef2f2,stroke:#ef4444,stroke-width:2px,color:#111
+    style NLB fill:#e0f2fe,stroke:#0369a1,color:#111
+    style NGINX fill:#e0f2fe,stroke:#0369a1,color:#111
