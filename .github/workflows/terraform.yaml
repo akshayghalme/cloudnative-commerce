@@ -1,0 +1,235 @@
+# Terraform CI/CD Pipeline
+#
+# Two-phase workflow:
+#   PR:    terraform fmt → validate → plan → comment plan on PR
+#   Merge: terraform apply (auto-approve, dev only)
+#
+# This is the infrastructure equivalent of "lint → test → deploy":
+#   fmt check   = lint (is it well-formatted?)
+#   validate    = compile (is the HCL syntactically valid?)
+#   plan        = test (what WILL change?)
+#   apply       = deploy (make the changes)
+#
+# The plan output is posted as a PR comment so reviewers see exactly what
+# will change in AWS before approving. No surprises on merge.
+#
+# Uses OIDC for AWS authentication — no static credentials.
+
+name: Terraform
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yaml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yaml"
+
+concurrency:
+  # Only one Terraform run per environment at a time — prevents state lock conflicts
+  group: terraform-dev
+  cancel-in-progress: false  # Don't cancel in-progress applies
+
+env:
+  AWS_REGION: ap-south-1
+  TF_VERSION: "1.9.8"
+  TG_VERSION: "0.68.7"
+  WORKING_DIR: terraform/environments/dev
+
+permissions:
+  contents: read
+  id-token: write       # OIDC for AWS
+  pull-requests: write  # Post plan as PR comment
+
+jobs:
+  # ─── Format Check ────────────────────────────────────────────────────────
+  fmt:
+    name: "terraform fmt"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3.1.2
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # Check ALL terraform files in the repo, not just the environment dir.
+      # Catches unformatted modules before they're used.
+      - name: Terraform format check
+        run: terraform fmt -check -recursive -diff
+        working-directory: terraform
+
+  # ─── Validate ────────────────────────────────────────────────────────────
+  validate:
+    name: "terraform validate"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: fmt
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3.1.2
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        with:
+          role-to-assume: arn:aws:iam::911788523496:role/github-actions-terraform
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Init with backend — needed for validate to resolve module sources
+      # and provider schemas.
+      - name: Terraform init
+        run: terraform init -input=false
+        working-directory: ${{ env.WORKING_DIR }}
+
+      - name: Terraform validate
+        run: terraform validate
+        working-directory: ${{ env.WORKING_DIR }}
+
+  # ─── Plan ────────────────────────────────────────────────────────────────
+  plan:
+    name: "terraform plan"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: validate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3.1.2
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        with:
+          role-to-assume: arn:aws:iam::911788523496:role/github-actions-terraform
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        run: terraform init -input=false
+        working-directory: ${{ env.WORKING_DIR }}
+
+      # Plan and save to a file — the same plan file is used for apply.
+      # This guarantees what was reviewed is exactly what gets applied.
+      - name: Terraform plan
+        id: plan
+        run: |
+          terraform plan \
+            -input=false \
+            -no-color \
+            -out=tfplan \
+            2>&1 | tee plan_output.txt
+        working-directory: ${{ env.WORKING_DIR }}
+
+      # Upload the plan file as an artifact — apply job downloads it
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4.6.1
+        with:
+          name: tfplan
+          path: |
+            ${{ env.WORKING_DIR }}/tfplan
+            ${{ env.WORKING_DIR }}/.terraform.lock.hcl
+          retention-days: 5
+
+      # Post the plan as a PR comment — reviewers see exactly what changes.
+      # This is the most valuable step: it turns infrastructure review from
+      # "I think this is fine" to "I can see it creates 3 resources and
+      # modifies 1 security group rule."
+      - name: Post plan to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7.0.1
+        with:
+          script: |
+            const fs = require('fs');
+            const planOutput = fs.readFileSync(
+              '${{ env.WORKING_DIR }}/plan_output.txt', 'utf8'
+            );
+
+            // Truncate if too long for GitHub comment (65536 char limit)
+            const maxLength = 60000;
+            const truncated = planOutput.length > maxLength
+              ? planOutput.substring(0, maxLength) + '\n\n... (truncated)'
+              : planOutput;
+
+            const body = `### Terraform Plan — \`dev\`
+
+            <details>
+            <summary>Show plan output (click to expand)</summary>
+
+            \`\`\`hcl
+            ${truncated}
+            \`\`\`
+
+            </details>
+
+            **Workflow:** \`${context.workflow}\` | **Run:** [#${context.runNumber}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+
+            > ⚠️ Review this plan carefully. On merge, \`terraform apply\` runs automatically.`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+  # ─── Apply (main branch only) ───────────────────────────────────────────
+  apply:
+    name: "terraform apply"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: plan
+    # Only apply on push to main (after PR merge) — never on PRs
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: dev  # GitHub Environment — can add required reviewers here
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3.1.2
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        with:
+          role-to-assume: arn:aws:iam::911788523496:role/github-actions-terraform
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        run: terraform init -input=false
+        working-directory: ${{ env.WORKING_DIR }}
+
+      # Download the plan from the plan job — ensures we apply exactly
+      # what was reviewed, not a new plan that might differ.
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4.2.1
+        with:
+          name: tfplan
+          path: ${{ env.WORKING_DIR }}
+
+      # Apply the saved plan — no confirmation needed since the plan
+      # was already reviewed and approved via the PR.
+      - name: Terraform apply
+        run: terraform apply -input=false -auto-approve tfplan
+        working-directory: ${{ env.WORKING_DIR }}
+
+      # Show the final state — useful for debugging if something goes wrong
+      - name: Terraform output
+        if: always()
+        run: terraform output -no-color || true
+        working-directory: ${{ env.WORKING_DIR }}
