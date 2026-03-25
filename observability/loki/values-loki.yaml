@@ -1,0 +1,113 @@
+# Loki Helm values
+# Chart: grafana/loki v6.24.0
+# Install: helm install loki grafana/loki -n monitoring -f values-loki.yaml
+#
+# Loki is a log aggregation system — "like Prometheus, but for logs."
+# It indexes log metadata (labels) but NOT the log content itself.
+# This makes it dramatically cheaper and faster than Elasticsearch:
+# - ELK: indexes every word → huge storage, slow at scale
+# - Loki: indexes labels only → small index, grep at query time
+#
+# Logs are queried via LogQL (similar to PromQL) in Grafana.
+# Example: {namespace="commerce", app="product-api"} |= "error"
+
+# ─── Deployment Mode ────────────────────────────────────────────────────
+# SingleBinary mode — all components in one pod. Suitable for dev/small
+# clusters (< 100 GB/day). For production scale, switch to SimpleScalable
+# or Microservices mode.
+deploymentMode: SingleBinary
+
+singleBinary:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+  persistence:
+    enabled: true
+    storageClass: gp3
+    size: 50Gi
+
+# ─── Schema & Storage ──────────────────────────────────────────────────
+loki:
+  # Authentication disabled — in a single-tenant setup (one cluster),
+  # multi-tenancy adds overhead without benefit.
+  auth_enabled: false
+
+  commonConfig:
+    replication_factor: 1
+
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+
+  storage:
+    type: filesystem
+
+  # Retention — keep logs for 14 days. Matches Prometheus retention (15d).
+  # Logs older than this are deleted automatically.
+  limits_config:
+    retention_period: 336h  # 14 days
+    max_query_length: 721h
+    max_query_parallelism: 4
+    # Per-stream rate limit — prevents a single noisy service from
+    # overwhelming Loki. 10 MB/s is generous for most workloads.
+    per_stream_rate_limit: 10MB
+    per_stream_rate_limit_burst: 20MB
+    ingestion_rate_mb: 20
+    ingestion_burst_size_mb: 30
+
+  # Compactor — handles retention enforcement and index compaction
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+    working_directory: /loki/compactor
+
+# ─── Gateway ───────────────────────────────────────────────────────────
+# The gateway is an nginx reverse proxy in front of Loki.
+# Grafana and Promtail connect to the gateway, not directly to Loki.
+gateway:
+  enabled: true
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# ─── Monitoring ────────────────────────────────────────────────────────
+# Loki exposes Prometheus metrics about itself — ingest rate, query
+# latency, storage usage. Scraped by Prometheus via ServiceMonitor.
+monitoring:
+  serviceMonitor:
+    enabled: true
+    namespace: monitoring
+  selfMonitoring:
+    enabled: false
+    grafanaAgent:
+      installOperator: false
+
+# ─── Disable unused components ─────────────────────────────────────────
+# In SingleBinary mode, these distributed components are not needed.
+backend:
+  replicas: 0
+read:
+  replicas: 0
+write:
+  replicas: 0
+
+# ─── Test ──────────────────────────────────────────────────────────────
+test:
+  enabled: false
