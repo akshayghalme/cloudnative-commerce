@@ -1,0 +1,14 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: storefront
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: storefront
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: cloudnative-commerce
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: storefront
