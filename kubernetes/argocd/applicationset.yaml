@@ -1,0 +1,78 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: commerce-services
+  namespace: argocd
+spec:
+  # Matrix generator: cartesian product of services × environments.
+  # Result: 9 Applications (3 services × 3 environments).
+  # To add a new environment: add one entry to the environments list.
+  # To add a new service: add one entry to the services list.
+  generators:
+    - matrix:
+        generators:
+          - list:
+              elements:
+                - service: product-api
+                - service: storefront
+                - service: order-worker
+          - list:
+              elements:
+                - environment: dev
+                  autoSync: "true"      # dev auto-syncs on every push
+                  project: commerce
+                - environment: staging
+                  autoSync: "true"      # staging auto-syncs for fast feedback
+                  project: commerce
+                - environment: prod
+                  autoSync: "false"     # prod requires manual sync approval
+                  project: commerce
+
+  template:
+    metadata:
+      # Name pattern: <service>-<environment> (e.g. product-api-dev)
+      name: "{{service}}-{{environment}}"
+      namespace: argocd
+      labels:
+        app.kubernetes.io/name: "{{service}}"
+        environment: "{{environment}}"
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+
+    spec:
+      project: "{{project}}"
+
+      source:
+        repoURL: https://github.com/akshayghalme/cloudnative-commerce
+        targetRevision: HEAD
+        # Path pattern resolves to e.g. kubernetes/overlays/dev/product-api
+        path: "kubernetes/overlays/{{environment}}/{{service}}"
+
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: commerce
+
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+          allowEmpty: false
+        syncOptions:
+          - CreateNamespace=true
+          - PrunePropagationPolicy=foreground
+          - PruneLast=true
+          - ApplyOutOfSyncOnly=true
+        retry:
+          limit: 3
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m
+
+      ignoreDifferences:
+        # Ignore replica count differences — HPA manages this field after initial deploy.
+        # Without this, ArgoCD shows "OutOfSync" whenever HPA scales the deployment.
+        - group: apps
+          kind: Deployment
+          jsonPointers:
+            - /spec/replicas
