@@ -1,0 +1,179 @@
+# SLO Recording + Alerting Rules — product-api
+#
+# SLOs (Service Level Objectives) define "how reliable should this service be?"
+# They're expressed as: "99.9% of requests succeed within 500ms over 30 days."
+#
+# Error budget = 100% - SLO = 0.1% = 43 minutes of downtime per 30 days.
+#
+# Burn rate = how fast are we consuming the error budget?
+# - Burn rate 1.0 = consuming budget at exactly the allowed rate
+# - Burn rate 14.4 = consuming 14.4x faster = budget exhausted in 2 days
+# - Burn rate 6.0 = consuming 6x faster = budget exhausted in 5 days
+#
+# Multi-window alerting (Google SRE):
+# - Fast burn (14.4x over 1h, confirmed over 5m) → page immediately
+# - Medium burn (6x over 6h, confirmed over 30m) → page (ticket + investigate)
+# - Slow burn (3x over 3d, confirmed over 6h) → ticket (investigate this week)
+#
+# This approach avoids both false alerts (too sensitive) and missed incidents
+# (too slow). The short window catches real incidents; the long window
+# confirms it's sustained, not a blip.
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: slo-product-api
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: cloudnative-commerce
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    # ─── Recording Rules ─────────────────────────────────────────────
+    # Pre-compute SLI metrics for dashboard and alert efficiency.
+    - name: slo-product-api-recording
+      interval: 30s
+      rules:
+        # SLI: availability — ratio of successful (non-5xx) requests
+        - record: slo:product_api:availability:rate5m
+          expr: |
+            1 - (
+              sum(rate(http_requests_total{service="product-api", status=~"5.."}[5m]))
+              /
+              sum(rate(http_requests_total{service="product-api"}[5m]))
+            )
+
+        - record: slo:product_api:availability:rate1h
+          expr: |
+            1 - (
+              sum(rate(http_requests_total{service="product-api", status=~"5.."}[1h]))
+              /
+              sum(rate(http_requests_total{service="product-api"}[1h]))
+            )
+
+        - record: slo:product_api:availability:rate6h
+          expr: |
+            1 - (
+              sum(rate(http_requests_total{service="product-api", status=~"5.."}[6h]))
+              /
+              sum(rate(http_requests_total{service="product-api"}[6h]))
+            )
+
+        - record: slo:product_api:availability:rate3d
+          expr: |
+            1 - (
+              sum(rate(http_requests_total{service="product-api", status=~"5.."}[3d]))
+              /
+              sum(rate(http_requests_total{service="product-api"}[3d]))
+            )
+
+        # SLI: latency — ratio of requests faster than 500ms
+        - record: slo:product_api:latency:rate5m
+          expr: |
+            sum(rate(http_request_duration_seconds_bucket{service="product-api", le="0.5"}[5m]))
+            /
+            sum(rate(http_request_duration_seconds_bucket{service="product-api", le="+Inf"}[5m]))
+
+        - record: slo:product_api:latency:rate1h
+          expr: |
+            sum(rate(http_request_duration_seconds_bucket{service="product-api", le="0.5"}[1h]))
+            /
+            sum(rate(http_request_duration_seconds_bucket{service="product-api", le="+Inf"}[1h]))
+
+        # Error budget remaining (30-day window)
+        - record: slo:product_api:error_budget_remaining
+          expr: |
+            1 - (
+              (1 - slo:product_api:availability:rate5m) / (1 - 0.999)
+            )
+
+    # ─── Burn Rate Alerts ────────────────────────────────────────────
+    - name: slo-product-api-alerts
+      rules:
+        # CRITICAL: Fast burn — 14.4x burn rate
+        # Budget exhausted in ~2 days at this rate.
+        # Short window (5m) catches the incident, long window (1h) confirms
+        # it's sustained and not a transient spike.
+        - alert: ProductAPIHighErrorBurnRate
+          expr: |
+            (
+              (1 - slo:product_api:availability:rate1h) / (1 - 0.999) > 14.4
+              and
+              (1 - slo:product_api:availability:rate5m) / (1 - 0.999) > 14.4
+            )
+          for: 2m
+          labels:
+            severity: critical
+            service: product-api
+            slo: availability
+            team: platform
+          annotations:
+            summary: "product-api error budget burning 14.4x faster than allowed"
+            description: |
+              product-api availability SLO (99.9%) is being violated.
+              Current 1h error rate: {{ $value | humanizePercentage }}
+              At this burn rate, the 30-day error budget will be exhausted in ~2 days.
+              Check: ArgoCD UI → product-api deployment status
+              Logs: {namespace="commerce", app="product-api"} | level="error"
+            runbook_url: "https://github.com/akshayghalme/cloudnative-commerce/blob/main/docs/runbooks/high-error-rate.md"
+
+        # WARNING: Medium burn — 6x burn rate
+        # Budget exhausted in ~5 days at this rate.
+        - alert: ProductAPIMediumErrorBurnRate
+          expr: |
+            (
+              (1 - slo:product_api:availability:rate6h) / (1 - 0.999) > 6
+              and
+              (1 - slo:product_api:availability:rate1h) / (1 - 0.999) > 6
+            )
+          for: 5m
+          labels:
+            severity: warning
+            service: product-api
+            slo: availability
+            team: platform
+          annotations:
+            summary: "product-api error budget burning 6x faster than allowed"
+            description: |
+              product-api availability is degraded over the last 6 hours.
+              At this burn rate, the 30-day error budget will be exhausted in ~5 days.
+
+        # INFO: Slow burn — 3x burn rate over 3 days
+        # Budget will be exhausted before the month ends.
+        - alert: ProductAPISlowErrorBurnRate
+          expr: |
+            (
+              (1 - slo:product_api:availability:rate3d) / (1 - 0.999) > 3
+              and
+              (1 - slo:product_api:availability:rate6h) / (1 - 0.999) > 3
+            )
+          for: 30m
+          labels:
+            severity: info
+            service: product-api
+            slo: availability
+            team: platform
+          annotations:
+            summary: "product-api slow error budget burn — investigate this week"
+            description: |
+              product-api has been slowly consuming its error budget over 3 days.
+              At this rate, the 30-day budget will be exhausted before month end.
+
+        # Latency SLO alert — P99 > 500ms sustained
+        - alert: ProductAPIHighLatency
+          expr: |
+            slo:product_api:latency:rate1h < 0.999
+            and
+            slo:product_api:latency:rate5m < 0.999
+          for: 5m
+          labels:
+            severity: warning
+            service: product-api
+            slo: latency
+            team: platform
+          annotations:
+            summary: "product-api latency SLO violated — >0.1% of requests exceed 500ms"
+            description: |
+              More than 0.1% of product-api requests are taking longer than 500ms.
+              Check for: N+1 queries, missing DB indexes, upstream dependency latency.

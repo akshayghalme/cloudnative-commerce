@@ -1,0 +1,86 @@
+# SLO Recording + Alerting Rules — storefront
+#
+# SLO: 99.5% availability (less strict than product-api — frontend can
+# gracefully degrade with cached content or static fallbacks).
+# Error budget: 0.5% = ~3.6 hours per 30 days.
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: slo-storefront
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: cloudnative-commerce
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: slo-storefront-recording
+      interval: 30s
+      rules:
+        - record: slo:storefront:availability:rate5m
+          expr: |
+            1 - (
+              sum(rate(http_requests_total{service="storefront", status=~"5.."}[5m]))
+              /
+              sum(rate(http_requests_total{service="storefront"}[5m]))
+            )
+
+        - record: slo:storefront:availability:rate1h
+          expr: |
+            1 - (
+              sum(rate(http_requests_total{service="storefront", status=~"5.."}[1h]))
+              /
+              sum(rate(http_requests_total{service="storefront"}[1h]))
+            )
+
+        - record: slo:storefront:availability:rate6h
+          expr: |
+            1 - (
+              sum(rate(http_requests_total{service="storefront", status=~"5.."}[6h]))
+              /
+              sum(rate(http_requests_total{service="storefront"}[6h]))
+            )
+
+        - record: slo:storefront:error_budget_remaining
+          expr: |
+            1 - (
+              (1 - slo:storefront:availability:rate5m) / (1 - 0.995)
+            )
+
+    - name: slo-storefront-alerts
+      rules:
+        - alert: StorefrontHighErrorBurnRate
+          expr: |
+            (
+              (1 - slo:storefront:availability:rate1h) / (1 - 0.995) > 14.4
+              and
+              (1 - slo:storefront:availability:rate5m) / (1 - 0.995) > 14.4
+            )
+          for: 2m
+          labels:
+            severity: critical
+            service: storefront
+            slo: availability
+            team: platform
+          annotations:
+            summary: "storefront error budget burning 14.4x faster than allowed"
+            description: |
+              storefront availability SLO (99.5%) is being violated.
+              At this burn rate, the error budget will be exhausted in ~2 days.
+
+        - alert: StorefrontMediumErrorBurnRate
+          expr: |
+            (
+              (1 - slo:storefront:availability:rate6h) / (1 - 0.995) > 6
+              and
+              (1 - slo:storefront:availability:rate1h) / (1 - 0.995) > 6
+            )
+          for: 5m
+          labels:
+            severity: warning
+            service: storefront
+            slo: availability
+            team: platform
+          annotations:
+            summary: "storefront error budget burning 6x faster than allowed"
