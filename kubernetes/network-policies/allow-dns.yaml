@@ -1,0 +1,35 @@
+# Allow DNS — every pod needs DNS resolution to function.
+#
+# The default-deny policy blocks all egress, including DNS (UDP/TCP 53 to
+# kube-dns in kube-system). Without this policy, no pod can resolve service
+# names, external hostnames, or anything that requires DNS.
+#
+# This is always the first allow policy you create after default-deny.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: commerce
+  labels:
+    app.kubernetes.io/part-of: cloudnative-commerce
+    app.kubernetes.io/managed-by: kustomize
+    policy-type: baseline
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # Allow DNS to kube-dns (CoreDNS) in kube-system
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
