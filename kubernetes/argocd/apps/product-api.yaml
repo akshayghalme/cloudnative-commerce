@@ -1,0 +1,55 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: product-api-dev
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: product-api
+    environment: dev
+  # Finalizer ensures ArgoCD deletes all managed resources when
+  # this Application is deleted — prevents orphaned K8s objects.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: commerce
+
+  source:
+    repoURL: https://github.com/akshayghalme/cloudnative-commerce
+    targetRevision: HEAD
+    # Point to the dev overlay — ArgoCD runs `kustomize build` here
+    path: kubernetes/overlays/dev/product-api
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: commerce
+
+  syncPolicy:
+    automated:
+      # Auto-sync when Git changes — this is the core of GitOps.
+      # A push to main triggers ArgoCD to reconcile the cluster state.
+      prune: true        # Delete resources removed from Git
+      selfHeal: true     # Revert manual kubectl changes (drift detection)
+      allowEmpty: false  # Never sync an empty application (safety guard)
+
+    syncOptions:
+      - CreateNamespace=true      # Create commerce namespace if missing
+      - PrunePropagationPolicy=foreground  # Wait for pod deletion before proceeding
+      - PruneLast=true            # Delete old resources after new ones are healthy
+      - ApplyOutOfSyncOnly=true   # Only apply resources that differ from cluster state
+
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # Health checks — ArgoCD uses these to determine if the sync succeeded.
+  # Default health checks cover Deployment, Service, HPA — sufficient here.
+  ignoreDifferences:
+    # ArgoCD and HPA both write to replicas — ignore this field to prevent
+    # constant "OutOfSync" when HPA has scaled the deployment.
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas

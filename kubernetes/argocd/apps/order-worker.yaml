@@ -1,0 +1,44 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: order-worker-dev
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: order-worker
+    environment: dev
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: commerce
+
+  source:
+    repoURL: https://github.com/akshayghalme/cloudnative-commerce
+    targetRevision: HEAD
+    path: kubernetes/overlays/dev/order-worker
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: commerce
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
