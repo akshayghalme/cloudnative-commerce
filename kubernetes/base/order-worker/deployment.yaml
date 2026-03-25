@@ -1,0 +1,156 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-worker
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: order-worker
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: cloudnative-commerce
+    app.kubernetes.io/managed-by: argocd
+spec:
+  # Workers scale based on SQS queue depth (KEDA — future enhancement),
+  # not CPU. Start with 2 for redundancy.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: order-worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Workers process long-running jobs — keep at least 1 running
+      # during rollouts so no messages are dropped.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: order-worker
+        app.kubernetes.io/component: worker
+        app.kubernetes.io/part-of: cloudnative-commerce
+        app.kubernetes.io/version: latest
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: order-worker
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: order-worker
+                topologyKey: kubernetes.io/hostname
+            - weight: 50
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: order-worker
+                topologyKey: topology.kubernetes.io/zone
+
+      containers:
+        - name: order-worker
+          image: order-worker:latest
+          imagePullPolicy: IfNotPresent
+
+          # No HTTP port — this is a queue consumer, not a server.
+          # Health is checked via the /healthz HTTP endpoint on port 9090
+          # (metrics + health sidecar pattern).
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          # Python SQS consumer is I/O bound (waiting on SQS long-poll).
+          # CPU is minimal; memory holds the message batch in-flight.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+
+          env:
+            - name: APP_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: order-worker-config
+                  key: APP_ENV
+            - name: SQS_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: order-worker-config
+                  key: SQS_QUEUE_URL
+            - name: SQS_DLQ_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: order-worker-config
+                  key: SQS_DLQ_URL
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: order-worker-config
+                  key: AWS_REGION
+            - name: PRODUCT_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: order-worker-config
+                  key: PRODUCT_API_URL
+            - name: METRICS_PORT
+              value: "9090"
+
+          # Liveness: check the worker's internal health HTTP endpoint.
+          # If the SQS consumer loop crashes, this probe detects it and restarts.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9090
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 9090
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+      # Longer grace period for worker — allow in-flight SQS message
+      # processing to complete before pod termination. SQS visibility
+      # timeout is 30s; set this to match or exceed it.
+      terminationGracePeriodSeconds: 60
