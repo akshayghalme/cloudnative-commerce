@@ -1,0 +1,123 @@
+# ingress-nginx Helm values
+# Chart: ingress-nginx/ingress-nginx v4.12.0
+# Install: helm install ingress-nginx ingress-nginx/ingress-nginx -n ingress-nginx --create-namespace -f values.yaml
+#
+# ingress-nginx is the Kubernetes ingress controller that:
+# - Provisions an AWS NLB (Network Load Balancer) via the AWS LB Controller
+# - Terminates TLS using certs from cert-manager
+# - Routes external traffic to backend services based on Ingress rules
+# - Handles rate limiting, CORS, and security headers
+#
+# All external traffic enters through this single point: NLB → ingress-nginx → services
+
+controller:
+  # 2 replicas for HA — spread across AZs via pod anti-affinity
+  replicaCount: 2
+
+  # Use IngressClass so only Ingresses with ingressClassName: nginx are handled
+  ingressClassResource:
+    name: nginx
+    enabled: true
+    default: true  # Make nginx the default IngressClass
+
+  # AWS NLB configuration — NLB (Layer 4) is preferred over ALB (Layer 7)
+  # because nginx handles L7 routing. NLB passes TCP directly to nginx.
+  service:
+    type: LoadBalancer
+    annotations:
+      # Use NLB instead of Classic LB
+      service.beta.kubernetes.io/aws-load-balancer-type: nlb
+      # Internet-facing (public subnets)
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+      # Use the AWS Load Balancer Controller (not in-tree cloud provider)
+      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+      # Cross-zone load balancing for even distribution across AZs
+      service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+      # Health check path for NLB target group
+      service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: /healthz
+      service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: http
+
+    externalTrafficPolicy: Local  # Preserve client source IP
+
+  # Resource requests/limits
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Pod disruption budget — always keep at least 1 controller running
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  # Anti-affinity — spread replicas across nodes/AZs
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/name
+                  operator: In
+                  values:
+                    - ingress-nginx
+            topologyKey: topology.kubernetes.io/zone
+
+  # Security headers — applied to ALL Ingresses by default
+  # Individual Ingresses can override via annotations.
+  config:
+    # HSTS — force HTTPS for 1 year
+    hsts: "true"
+    hsts-max-age: "31536000"
+    hsts-include-subdomains: "true"
+
+    # Hide server version (security through obscurity, but free)
+    server-tokens: "false"
+
+    # Proxy settings
+    proxy-body-size: "10m"              # Max request body (file uploads)
+    proxy-read-timeout: "60"            # Backend response timeout
+    proxy-send-timeout: "60"            # Send to backend timeout
+    proxy-connect-timeout: "10"         # Connect to backend timeout
+
+    # Real IP from NLB — use PROXY protocol or X-Forwarded-For
+    use-forwarded-headers: "true"
+    compute-full-forwarded-for: "true"
+
+    # Rate limiting defaults (can be overridden per-Ingress)
+    limit-req-status-code: "429"
+
+    # Enable access logging in JSON format for Loki (Task 36)
+    log-format-upstream: >-
+      {"time":"$time_iso8601","remote_addr":"$remote_addr",
+      "request_method":"$request_method","request_uri":"$request_uri",
+      "status":$status,"body_bytes_sent":$body_bytes_sent,
+      "request_time":$request_time,"upstream_response_time":"$upstream_response_time",
+      "http_user_agent":"$http_user_agent"}
+
+  # Prometheus metrics
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      namespace: monitoring
+
+  # Admission webhook — validates Ingress resources before creation
+  admissionWebhooks:
+    enabled: true
+
+# Default backend — serves 404 for unmatched requests
+defaultBackend:
+  enabled: true
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      cpu: 50m
+      memory: 64Mi
