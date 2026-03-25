@@ -1,0 +1,24 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: product-api
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: product-api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: cloudnative-commerce
+spec:
+  # minAvailable: at least 1 pod must be available during voluntary disruptions.
+  # Voluntary disruptions: node drain (Karpenter consolidation, kubectl drain),
+  # cluster upgrades, rolling deployments.
+  #
+  # This prevents Karpenter from draining all product-api pods simultaneously
+  # when consolidating nodes — it must wait for a new pod to start before
+  # terminating the last one on a draining node.
+  #
+  # Note: PDB does NOT protect against involuntary disruptions (node crash,
+  # OOMKill, hardware failure). That's what replica count + anti-affinity handles.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: product-api
