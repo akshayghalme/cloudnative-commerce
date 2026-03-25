@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: product-api-config
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: product-api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: cloudnative-commerce
+data:
+  # Non-sensitive configuration — safe to store in ConfigMap.
+  # Sensitive values (DB password) are fetched at runtime from
+  # Secrets Manager using the IRSA role — never stored in K8s Secrets.
+  APP_ENV: "production"
+  AWS_REGION: "ap-south-1"
+  PORT: "8080"
+  LOG_LEVEL: "info"
+
+  # Placeholders patched by Kustomize overlays with real Terraform outputs.
+  # Format: aws:secretsmanager:<region>:<account>:secret:<name>
+  DB_SECRET_ARN: "PLACEHOLDER_DB_SECRET_ARN"
+  REDIS_URL: "PLACEHOLDER_REDIS_URL"

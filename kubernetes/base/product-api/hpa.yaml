@@ -1,0 +1,63 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: product-api
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: product-api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: cloudnative-commerce
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: product-api
+
+  # Replica bounds — overlays patch these per environment.
+  # HPA will never scale below minReplicas or above maxReplicas.
+  minReplicas: 2
+  maxReplicas: 10
+
+  metrics:
+    # Scale on CPU utilization.
+    # At 60% CPU, add replicas. Go APIs are CPU-bound (JSON marshal/unmarshal,
+    # HTTP handling) so CPU is the right primary signal.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+
+    # Scale on memory utilization.
+    # Secondary signal — catches memory leaks before OOMKill events.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+  behavior:
+    # Scale out aggressively — traffic spikes need fast response.
+    # Add up to 4 pods per 60s stabilization window.
+    scaleUp:
+      stabilizationWindowSeconds: 0  # React immediately to scale-up signals
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+        - type: Percent
+          value: 100  # Or double the current count, whichever is larger
+          periodSeconds: 60
+      selectPolicy: Max
+
+    # Scale in conservatively — avoid thrashing after a traffic spike.
+    # Remove at most 1 pod per 5 minutes after a 5-minute cool-down.
+    scaleDown:
+      stabilizationWindowSeconds: 300  # 5-minute cool-down
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 300
+      selectPolicy: Min
