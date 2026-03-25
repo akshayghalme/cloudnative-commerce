@@ -1,6 +1,6 @@
 # Dev environment — wires all modules together.
 # Each module is added as tasks are completed.
-# Current: VPC + EKS + RDS + ElastiCache.
+# Current: VPC + EKS + RDS + ElastiCache + ECR + IAM/IRSA.
 
 locals {
   name   = "${var.project}-${var.environment}"
@@ -113,6 +113,45 @@ module "elasticache" {
   transit_encryption_enabled = false
 
   snapshot_retention_limit = 1
+
+  tags = local.tags
+}
+
+# ─── ECR ──────────────────────────────────────────────────────────────────────
+
+module "ecr" {
+  source = "../../modules/ecr"
+
+  name_prefix          = local.name
+  image_tag_mutability = "IMMUTABLE" # Prevents overwriting a tag once pushed
+  scan_on_push         = true
+  image_count_to_keep  = 20
+
+  repositories = {
+    product-api  = {}
+    storefront   = {}
+    order-worker = {}
+  }
+
+  tags = local.tags
+}
+
+# ─── IAM / IRSA ───────────────────────────────────────────────────────────────
+
+module "iam" {
+  source = "../../modules/iam"
+
+  cluster_name      = module.eks.cluster_name
+  oidc_provider_arn = module.eks.oidc_provider_arn
+  oidc_provider_url = module.eks.oidc_provider_url
+
+  # product-api: reads RDS credentials from Secrets Manager
+  rds_secret_arn = module.rds.db_secret_arn
+
+  # order-worker: SQS ARNs populated once queue is created (Task 27 CI)
+  # Using wildcard for now — tightened when SQS module is added
+  sqs_queue_arn = "arn:aws:sqs:${var.aws_region}:*:${local.name}-orders"
+  sqs_dlq_arn   = "arn:aws:sqs:${var.aws_region}:*:${local.name}-orders-dlq"
 
   tags = local.tags
 }
