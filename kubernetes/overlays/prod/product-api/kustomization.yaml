@@ -1,0 +1,52 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../../base/product-api
+
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: product-api
+        namespace: commerce
+      spec:
+        replicas: 3
+        template:
+          metadata:
+            labels:
+              # Prod image tag is a full git SHA — never a branch name.
+              # CI sets this during the deploy step.
+              app.kubernetes.io/version: PLACEHOLDER_GIT_SHA
+
+  - patch: |-
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: product-api
+        namespace: commerce
+      spec:
+        minReplicas: 3
+        maxReplicas: 10
+
+  - patch: |-
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: product-api
+        namespace: commerce
+        annotations:
+          eks.amazonaws.com/role-arn: arn:aws:iam::911788523496:role/cloudnative-commerce-prod-product-api-irsa
+
+  - patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: product-api-config
+        namespace: commerce
+      data:
+        APP_ENV: "production"
+        LOG_LEVEL: "warn"
+        DB_SECRET_ARN: "arn:aws:secretsmanager:ap-south-1:911788523496:secret:cloudnative-commerce-prod/rds/master-credentials"
+        REDIS_URL: "PLACEHOLDER_PROD_REDIS_ENDPOINT"
