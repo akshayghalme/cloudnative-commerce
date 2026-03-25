@@ -1,0 +1,226 @@
+# Security Scanning Pipeline
+#
+# Runs on every PR and push to main. Four parallel scan types:
+#   1. Trivy — container image CVE scanning
+#   2. Checkov — Terraform/Kubernetes IaC misconfiguration scanning
+#   3. Semgrep — SAST (static application security testing)
+#   4. Dependency audit — language-specific vulnerability checks
+#
+# Each scanner catches a different vulnerability class:
+#   Trivy:    "Does the container image have known CVEs?"
+#   Checkov:  "Is the infrastructure configured securely?"
+#   Semgrep:  "Does the application code have security bugs?"
+#   Dep audit: "Do our dependencies have known vulnerabilities?"
+#
+# Findings are uploaded as SARIF to GitHub Security tab for unified triage.
+
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Run weekly even without code changes — new CVEs are published daily
+  schedule:
+    - cron: "0 6 * * 1"  # Every Monday at 06:00 UTC
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write  # Required for uploading SARIF to GitHub Security tab
+
+# ─── Trivy: Container Image Scanning ───────────────────────────────────────
+jobs:
+  trivy-image-scan:
+    name: "Trivy: container images"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [product-api, storefront, order-worker]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      # Build the image locally (don't push) — Trivy scans the local image
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ matrix.service }}:scan \
+            services/${{ matrix.service }}/
+
+      # Trivy scans the image for:
+      # - OS package CVEs (Alpine, Debian packages)
+      # - Language-specific CVEs (Go modules, npm packages, pip packages)
+      # - Misconfigurations in the Dockerfile itself
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: "${{ matrix.service }}:scan"
+          format: sarif
+          output: trivy-${{ matrix.service }}.sarif
+          severity: "CRITICAL,HIGH"
+          # Don't fail the build on findings — report to Security tab for triage.
+          # Switch to exit-code: 1 once existing findings are resolved.
+          exit-code: "0"
+
+      - name: Upload Trivy SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3.28.9
+        if: always()
+        with:
+          sarif_file: trivy-${{ matrix.service }}.sarif
+          category: trivy-${{ matrix.service }}
+
+  # Trivy filesystem scan — catches vulnerabilities in lock files without
+  # building Docker images. Faster feedback loop on PRs.
+  trivy-fs-scan:
+    name: "Trivy: filesystem"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Run Trivy filesystem scanner
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: "."
+          format: sarif
+          output: trivy-fs.sarif
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"
+
+      - name: Upload Trivy FS SARIF
+        uses: github/codeql-action/upload-sarif@v3.28.9
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-filesystem
+
+# ─── Checkov: Infrastructure as Code Scanning ──────────────────────────────
+  checkov:
+    name: "Checkov: IaC scan"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      # Checkov scans Terraform, Kubernetes YAML, Dockerfiles, and Helm charts
+      # for security misconfigurations against 1000+ built-in policies.
+      # Examples: S3 bucket without encryption, security group open to 0.0.0.0/0,
+      # container running as root, missing resource limits.
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@v12.2963.0
+        with:
+          directory: .
+          # Scan Terraform modules, Kubernetes manifests, and Dockerfiles
+          framework: terraform,kubernetes,dockerfile
+          output_format: cli,sarif
+          output_file_path: console,checkov.sarif
+          # Soft fail — report findings without blocking PRs.
+          # Set to false once baseline findings are resolved.
+          soft_fail: true
+          # Skip checks that are intentional in our architecture:
+          # CKV_AWS_145: S3 bucket KMS encryption (we use AES256, not KMS — cost trade-off)
+          # CKV_K8S_43: Image tag using digest (we use SHA tags, not digests yet)
+          skip_check: "CKV_AWS_145,CKV_K8S_43"
+
+      - name: Upload Checkov SARIF
+        uses: github/codeql-action/upload-sarif@v3.28.9
+        if: always()
+        with:
+          sarif_file: checkov.sarif
+          category: checkov
+
+# ─── Semgrep: Static Application Security Testing ─────────────────────────
+  semgrep:
+    name: "Semgrep: SAST"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    container:
+      image: semgrep/semgrep:1.102.0
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      # Semgrep performs pattern-based static analysis to find:
+      # - SQL injection, XSS, command injection (OWASP Top 10)
+      # - Hardcoded secrets and credentials
+      # - Insecure use of crypto, deserialization, etc.
+      # - Language-specific anti-patterns (Go, Python, JavaScript)
+      - name: Run Semgrep
+        run: |
+          semgrep scan \
+            --config "p/default" \
+            --config "p/owasp-top-ten" \
+            --config "p/golang" \
+            --config "p/python" \
+            --config "p/javascript" \
+            --config "p/docker" \
+            --sarif \
+            --output semgrep.sarif \
+            --error \
+            . || true
+        # || true — don't block PRs on first run. Remove once baseline is clean.
+
+      - name: Upload Semgrep SARIF
+        uses: github/codeql-action/upload-sarif@v3.28.9
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+# ─── Dependency Audit: Language-Specific Vulnerability Checks ──────────────
+  dependency-audit:
+    name: "Dependency audit"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      # Go: govulncheck checks Go dependencies against the Go vulnerability database.
+      # Unlike Trivy (which checks CVE databases), govulncheck does reachability
+      # analysis — it only reports vulnerabilities in code paths you actually call.
+      - name: Set up Go
+        uses: actions/setup-go@v5.3.0
+        with:
+          go-version: "1.22"
+          cache-dependency-path: services/product-api/go.sum
+
+      - name: Go vulnerability check
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          cd services/product-api
+          govulncheck ./... || true
+
+      # Python: pip-audit checks pip dependencies against the OSV database.
+      # More reliable than `safety` for open-source use (safety requires a paid API key
+      # for full database access).
+      - name: Set up Python
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Python dependency audit
+        run: |
+          pip install pip-audit
+          cd services/order-worker
+          pip-audit -r requirements.txt || true
+
+      # Node.js: npm audit checks npm dependencies against the GitHub Advisory Database.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4.3.0
+        with:
+          node-version: "20"
+
+      - name: Node.js dependency audit
+        run: |
+          cd services/storefront
+          npm audit --audit-level=high || true
