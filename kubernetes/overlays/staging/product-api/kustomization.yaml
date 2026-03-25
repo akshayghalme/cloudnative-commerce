@@ -1,0 +1,50 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../../base/product-api
+
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: product-api
+        namespace: commerce
+      spec:
+        replicas: 2
+        template:
+          metadata:
+            labels:
+              app.kubernetes.io/version: staging
+
+  - patch: |-
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: product-api
+        namespace: commerce
+      spec:
+        minReplicas: 2
+        maxReplicas: 6
+
+  - patch: |-
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: product-api
+        namespace: commerce
+        annotations:
+          # Staging uses the same AWS account but a different IAM role
+          eks.amazonaws.com/role-arn: arn:aws:iam::911788523496:role/cloudnative-commerce-staging-product-api-irsa
+
+  - patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: product-api-config
+        namespace: commerce
+      data:
+        APP_ENV: "staging"
+        DB_SECRET_ARN: "arn:aws:secretsmanager:ap-south-1:911788523496:secret:cloudnative-commerce-staging/rds/master-credentials"
+        REDIS_URL: "PLACEHOLDER_STAGING_REDIS_ENDPOINT"
