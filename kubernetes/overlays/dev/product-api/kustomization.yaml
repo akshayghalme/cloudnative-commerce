@@ -1,0 +1,66 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Reference the base manifests
+resources:
+  - ../../../base/product-api
+
+# Patches specific to the dev environment
+patches:
+  # Patch 1: replica count + image tag
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: product-api
+        namespace: commerce
+      spec:
+        replicas: 1
+        template:
+          metadata:
+            labels:
+              app.kubernetes.io/version: dev
+          spec:
+            containers:
+              - name: product-api
+                image: product-api:dev
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 200m
+                    memory: 128Mi
+
+  # Patch 2: HPA — lower min/max in dev to save costs
+  - patch: |-
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: product-api
+        namespace: commerce
+      spec:
+        minReplicas: 1
+        maxReplicas: 3
+
+  # Patch 3: IRSA role ARN — replace placeholder with real Terraform output
+  - patch: |-
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: product-api
+        namespace: commerce
+        annotations:
+          eks.amazonaws.com/role-arn: arn:aws:iam::911788523496:role/cloudnative-commerce-dev-product-api-irsa
+
+  # Patch 4: ConfigMap — real values from Terraform outputs
+  - patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: product-api-config
+        namespace: commerce
+      data:
+        APP_ENV: "development"
+        DB_SECRET_ARN: "arn:aws:secretsmanager:ap-south-1:911788523496:secret:cloudnative-commerce-dev/rds/master-credentials"
+        REDIS_URL: "PLACEHOLDER_REDIS_ENDPOINT"
