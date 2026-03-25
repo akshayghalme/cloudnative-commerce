@@ -1,0 +1,161 @@
+# Verify Image Signatures — reject unsigned container images at admission.
+#
+# This is the enforcement side of the supply chain security story:
+#   Task 29: CI signs images with Cosign (keyless, via Sigstore/Fulcio)
+#   Task 33: Kyverno verifies those signatures before allowing deployment
+#
+# Without this policy, an attacker who gains ECR push access could push a
+# malicious image with a legitimate-looking tag. With signature verification,
+# only images signed by our GitHub Actions CI pipeline are admitted.
+#
+# How keyless verification works:
+# 1. Pod admission request arrives with image reference
+# 2. Kyverno fetches the Cosign signature from the ECR registry
+# 3. Kyverno verifies the signature against Sigstore's Fulcio root CA
+# 4. Kyverno checks the OIDC identity in the certificate matches our repo
+# 5. If valid → pod is admitted. If invalid → pod is rejected.
+#
+# The OIDC issuer + subject regex together prove:
+# - The image was signed by a GitHub Actions workflow (issuer)
+# - The workflow ran in OUR repository (subject regex)
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signatures
+  annotations:
+    policies.kyverno.io/title: Verify Container Image Signatures
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Verifies that container images from our ECR registry are signed
+      by our CI pipeline using Cosign keyless signing (Sigstore).
+      Unsigned or tampered images are rejected at admission.
+spec:
+  # Enforce — unsigned images are blocked, not just audited.
+  # This is the strongest supply chain control we have.
+  validationFailureAction: Enforce
+  background: true
+  webhookTimeoutSeconds: 30
+
+  rules:
+    - name: verify-cosign-signature
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      # Only verify images from our ECR registry.
+      # Third-party images (distroless, nginx, postgres) are covered by
+      # the restrict-registries policy — they don't have our signatures.
+      preconditions:
+        all:
+          - key: "{{ request.operation }}"
+            operator: NotEquals
+            value: DELETE
+      verifyImages:
+        # Verify all containers (init + regular) whose image matches our ECR
+        - imageReferences:
+            - "911788523496.dkr.ecr.ap-south-1.amazonaws.com/*"
+          attestors:
+            - entries:
+                - keyless:
+                    # Sigstore Fulcio — the CA that issued the signing certificate.
+                    # Fulcio issues short-lived certs tied to OIDC identity.
+                    # Rekor transparency log provides tamper-proof audit trail.
+                    issuer: https://token.actions.githubusercontent.com
+                    # Subject regex — matches the GitHub Actions workflow identity.
+                    # Format: https://github.com/<owner>/<repo>/.github/workflows/<file>@refs/heads/<branch>
+                    subject: "https://github.com/akshayghalme/cloudnative-commerce/.github/workflows/*"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+
+          # Mutate the image reference to use the digest instead of the tag.
+          # This prevents TOCTOU attacks: between verification and pod creation,
+          # an attacker could push a different image with the same tag.
+          # By rewriting to digest, the exact verified image is what runs.
+          mutateDigest: true
+
+          # Require the image to be referenced by digest after verification.
+          # Combined with mutateDigest, this ensures immutable image references.
+          required: true
+
+          # Verify SBOM attestation attached by Task 29.
+          # This ensures the image not only has a valid signature but also
+          # has an SBOM attestation — proof that the build produced a bill
+          # of materials for compliance purposes.
+          attestations:
+            - type: https://spdx.dev/Document
+              attestors:
+                - entries:
+                    - keyless:
+                        issuer: https://token.actions.githubusercontent.com
+                        subject: "https://github.com/akshayghalme/cloudnative-commerce/.github/workflows/*"
+                        rekor:
+                          url: https://rekor.sigstore.dev
+              conditions:
+                - all:
+                    # Verify the SBOM attestation exists and has content.
+                    # The actual SBOM content validation (specific packages,
+                    # license compliance) can be added as additional conditions.
+                    - key: "{{ creationInfo.created }}"
+                      operator: NotEquals
+                      value: ""
+
+    # Separate rule for images NOT from our ECR — these are third-party images
+    # (postgres, redis, nginx, distroless) that we don't sign.
+    # The restrict-registries policy already limits which registries are allowed.
+    # This rule explicitly skips signature verification for allowed third-party images.
+    - name: skip-third-party-images
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - argocd
+                - karpenter
+      preconditions:
+        all:
+          - key: "{{ request.operation }}"
+            operator: NotEquals
+            value: DELETE
+      validate:
+        message: >-
+          Third-party images must come from approved registries
+          (gcr.io/distroless, docker.io/library). See restrict-registries policy.
+        foreach:
+          - list: "request.object.spec.[initContainers, containers][]"
+            preconditions:
+              all:
+                # Only apply to non-ECR images
+                - key: "{{ element.image }}"
+                  operator: NotEquals
+                  value: "911788523496.dkr.ecr.ap-south-1.amazonaws.com/*"
+            deny:
+              conditions:
+                all:
+                  # Deny if not from an approved third-party registry
+                  - key: "{{ element.image }}"
+                    operator: NotEquals
+                    value: "gcr.io/distroless/*"
+                  - key: "{{ element.image }}"
+                    operator: NotEquals
+                    value: "docker.io/library/*"
+                  - key: "{{ element.image }}"
+                    operator: NotEquals
+                    value: "library/*"
+                  - key: "{{ element.image }}"
+                    operator: NotEquals
+                    value: "postgres:*"
+                  - key: "{{ element.image }}"
+                    operator: NotEquals
+                    value: "redis:*"
+                  - key: "{{ element.image }}"
+                    operator: NotEquals
+                    value: "nginx:*"
