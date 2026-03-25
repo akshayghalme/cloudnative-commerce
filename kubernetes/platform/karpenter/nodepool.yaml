@@ -1,0 +1,110 @@
+# NodePool — defines WHAT kind of nodes Karpenter should provision.
+# This is the scheduling-side config: instance types, architectures,
+# capacity types, taints, limits, and disruption policies.
+#
+# Karpenter v1 API (v1.x) — replaces the deprecated Provisioner CRD.
+#
+# How it works:
+# 1. A pod is unschedulable (no node has capacity)
+# 2. Karpenter evaluates this NodePool's requirements
+# 3. Karpenter picks the cheapest instance type that fits the pod's requests
+# 4. Karpenter launches the instance via EC2NodeClass config
+# 5. Pod is scheduled onto the new node
+
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  # Reference to the EC2NodeClass — tells Karpenter which AWS config to use.
+  template:
+    metadata:
+      labels:
+        managed-by: karpenter
+        node-type: workload
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+
+      # Scheduling requirements — Karpenter uses these to filter instance types.
+      requirements:
+        # Instance category — general purpose (t3, m5, m6i, m7i) and compute (c5, c6i, c7i).
+        # Excludes GPU, memory-optimized, and storage-optimized (not needed for this workload).
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["t", "m", "c"]
+
+        # Instance generation — only use current-gen instances.
+        # Older gens (m4, c4) are less cost-efficient and may lack features.
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["4"]
+
+        # Instance sizes — small through xlarge. This bounds the node size:
+        # - Too small (nano/micro): overhead from kubelet + daemonsets eats capacity
+        # - Too large (4xl+): blast radius of a single node failure is too high
+        - key: karpenter.k8s.aws/instance-size
+          operator: In
+          values: ["small", "medium", "large", "xlarge"]
+
+        # Architecture — x86_64 only. ARM (Graviton) is cheaper but requires
+        # multi-arch container images. Can be added later as an optimization.
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+
+        # Capacity type — prefer Spot for dev (60-90% savings), fall back to On-Demand.
+        # Karpenter handles Spot interruptions automatically (drains + replaces).
+        # In prod, this would be ["on-demand"] only.
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot", "on-demand"]
+
+      # Kubelet configuration — reserve resources for system processes.
+      # Without this, pods can starve the kubelet and cause node instability.
+      kubelet:
+        maxPods: 110
+        systemReserved:
+          cpu: 100m
+          memory: 256Mi
+          ephemeral-storage: 1Gi
+
+      # Taints — none on the default pool. All workloads can schedule here.
+      # Use a separate NodePool with taints for specialized workloads
+      # (e.g., GPU, high-memory jobs).
+
+      # Time to live — nodes expire after 720h (30 days) and are replaced.
+      # Forces AMI rotation for security patches without manual intervention.
+      expireAfter: 720h
+
+  # Disruption policy — controls how Karpenter consolidates and replaces nodes.
+  disruption:
+    # consolidationPolicy: WhenEmptyOrUnderutilized means Karpenter will:
+    # 1. Delete nodes that have no non-daemonset pods (empty)
+    # 2. Replace nodes that are underutilized (can pack pods onto fewer nodes)
+    # This keeps costs down by right-sizing the cluster continuously.
+    consolidationPolicy: WhenEmptyOrUnderutilized
+
+    # Wait 30 seconds after a node becomes empty/underutilized before acting.
+    # Prevents thrashing during rolling deployments where pods briefly move.
+    consolidateAfter: 30s
+
+    # Budgets control how many nodes can be disrupted simultaneously.
+    # 20% means Karpenter won't drain more than 20% of nodes at once —
+    # protects against cascading disruptions.
+    budgets:
+      - nodes: "20%"
+
+  # Cluster-wide limits — cap total resources Karpenter can provision.
+  # Safety net: prevents runaway scaling from a misconfigured HPA or
+  # resource-hungry workload. 32 CPU / 64 GiB is plenty for dev.
+  limits:
+    cpu: "32"
+    memory: 64Gi
+
+  # Weight — higher weight = higher priority when multiple NodePools match.
+  # With only one NodePool, this is informational. If we add a Graviton pool
+  # later, weight determines preference order.
+  weight: 100
