@@ -1,0 +1,66 @@
+# LitmusChaos Helm values
+# Chart: litmuschaos/litmus v3.10.0
+# Install: helm install litmus litmuschaos/litmus -n litmus --create-namespace -f values-litmus.yaml
+#
+# LitmusChaos is a Kubernetes-native chaos engineering framework.
+# It provides CRDs (ChaosEngine, ChaosExperiment, ChaosResult) that
+# let you define, run, and observe chaos experiments declaratively.
+#
+# How it works:
+# 1. Install ChaosExperiment CRDs (define what chaos to inject)
+# 2. Create a ChaosEngine (link experiment to target application)
+# 3. Litmus runs the experiment (injects fault)
+# 4. Probes check steady-state hypothesis during/after chaos
+# 5. ChaosResult reports pass/fail
+#
+# Why chaos engineering:
+# You THINK your system is resilient. Chaos engineering PROVES it.
+# "Everything works" is not a test result — "we killed 2 pods and
+# recovered in 12 seconds with zero errors" is.
+
+# Portal — web UI for managing experiments
+portal:
+  server:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 125m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  frontend:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+  # MongoDB for experiment state — Litmus uses MongoDB internally
+  mongodb:
+    persistence:
+      enabled: true
+      storageClass: gp3
+      size: 10Gi
+    resources:
+      requests:
+        cpu: 125m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+# Chaos operator — watches ChaosEngine CRDs and runs experiments
+operator:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
