@@ -1,0 +1,164 @@
+# CD Pipeline — Production Canary Deploy
+#
+# Promotes a staging-validated image to production using a canary strategy.
+# Requires manual approval, then rolls out traffic incrementally:
+#   10% → pause (manual check) → 30% → 50% → 100%
+#
+# Uses Argo Rollouts for canary traffic management — progressive delivery
+# with automatic rollback if metrics degrade.
+#
+# Flow:
+#   Staging validated → engineer triggers this workflow → approval gate
+#   → update prod image tags → commit → ArgoCD syncs to prod
+#   → Argo Rollouts manages canary progression
+#
+# Why canary (not blue-green or rolling):
+# - Canary limits blast radius: only 10% of users see the new version initially
+# - Automatic rollback: if error rate spikes, Rollouts reverts without human action
+# - Progressive: 10% → 30% → 50% → 100% gives multiple checkpoints
+
+name: CD Prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (SHA short, e.g., abc1234)"
+        required: true
+        type: string
+      services:
+        description: "Services to deploy (comma-separated, or 'all')"
+        required: true
+        default: "all"
+        type: string
+
+concurrency:
+  group: cd-prod
+  cancel-in-progress: false
+
+env:
+  ECR_REGISTRY: 911788523496.dkr.ecr.ap-south-1.amazonaws.com
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Pre-deploy Checks ────────────────────────────────────────────────────
+  pre-deploy-checks:
+    name: "Pre-deploy validation"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      # Verify the image tag exists in staging overlay — never promote
+      # an image that hasn't been through staging.
+      - name: Verify image was deployed to staging
+        run: |
+          TAG="${{ inputs.image_tag }}"
+          FOUND=false
+
+          for SERVICE in product-api storefront order-worker; do
+            KUSTOMIZE_FILE="kubernetes/overlays/staging/${SERVICE}/kustomization.yaml"
+            if [ -f "${KUSTOMIZE_FILE}" ] && grep -q "${TAG}" "${KUSTOMIZE_FILE}"; then
+              echo "✅ ${SERVICE}: tag ${TAG} found in staging overlay"
+              FOUND=true
+            fi
+          done
+
+          if [ "${FOUND}" = "false" ]; then
+            echo "❌ Image tag ${TAG} not found in any staging overlay."
+            echo "   Deploy to staging first before promoting to prod."
+            exit 1
+          fi
+
+  # ── Production Deploy ────────────────────────────────────────────────────
+  promote-to-prod:
+    name: "Promote to production"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: pre-deploy-checks
+    # Production environment — strictest approval requirements.
+    # Configure: Settings → Environments → production → Required reviewers (2+)
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Kustomize
+        uses: imranismail/setup-kustomize@v2.1.0
+        with:
+          kustomize-version: "5.4.3"
+
+      - name: Determine services to update
+        id: services
+        run: |
+          INPUT="${{ inputs.services }}"
+          if [ "${INPUT}" = "all" ]; then
+            echo "list=product-api storefront order-worker" >> "$GITHUB_OUTPUT"
+          else
+            echo "list=$(echo "${INPUT}" | tr ',' ' ')" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update prod image tags
+        run: |
+          TAG="${{ inputs.image_tag }}"
+          for SERVICE in ${{ steps.services.outputs.list }}; do
+            OVERLAY="kubernetes/overlays/prod/${SERVICE}"
+            if [ -d "${OVERLAY}" ]; then
+              echo "Updating ${SERVICE} to ${TAG}"
+              cd "${OVERLAY}"
+              kustomize edit set image \
+                "${{ env.ECR_REGISTRY }}/${SERVICE}=${{ env.ECR_REGISTRY }}/${SERVICE}:${TAG}"
+              cd -
+            else
+              echo "Warning: overlay ${OVERLAY} not found, skipping"
+            fi
+          done
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet; then
+            echo "No changes — skipping commit"
+            exit 0
+          fi
+
+          git add kubernetes/overlays/prod/
+          git commit -m "$(cat <<EOF
+          deploy(prod): canary rollout to ${{ inputs.image_tag }}
+
+          Services: ${{ inputs.services }}
+          Approved by: ${{ github.actor }}
+          Triggered: workflow_dispatch #${{ github.run_number }}
+
+          Argo Rollouts will manage the canary progression:
+          10% → pause → 30% → 50% → 100%
+          EOF
+          )"
+          git push origin main
+
+      - name: Summary
+        run: |
+          echo "### 🚀 Production Canary Deploy" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Image tag:** \`${{ inputs.image_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Services:** ${{ inputs.services }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Approved by:** ${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "#### Canary Progression" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Step | Traffic | Action |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|---------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 1 | 10% | Automatic (30s pause) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 2 | 30% | Automatic after analysis |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 3 | 50% | Automatic after analysis |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 4 | 100% | Full promotion |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Monitor: ArgoCD UI → product-api-prod → Rollout status" >> "$GITHUB_STEP_SUMMARY"
