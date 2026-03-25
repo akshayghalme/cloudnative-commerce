@@ -1,0 +1,63 @@
+# Require Resource Limits — every container must declare CPU and memory
+# requests AND limits.
+#
+# Why: a container without resource limits can consume unbounded CPU/memory,
+# starving other workloads on the same node (noisy neighbor problem).
+# Without requests, the scheduler can't make informed placement decisions,
+# leading to overcommitted nodes that OOM-kill random pods.
+#
+# This policy ensures:
+# - requests: scheduler knows how much capacity to reserve
+# - limits: kernel enforces a ceiling (OOM kill the offender, not bystanders)
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resource-limits
+  annotations:
+    policies.kyverno.io/title: Require Resource Requests and Limits
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      All containers must specify CPU and memory requests and limits.
+      Prevents noisy neighbor issues and enables proper scheduling.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-container-resources
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - argocd
+                - karpenter
+      validate:
+        message: >-
+          Container '{{request.object.spec.containers[].name}}' in pod
+          '{{request.object.metadata.name}}' must have CPU and memory
+          requests and limits defined.
+        foreach:
+          - list: "request.object.spec.containers[]"
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.resources.requests.cpu || '' }}"
+                    operator: Equals
+                    value: ""
+                  - key: "{{ element.resources.requests.memory || '' }}"
+                    operator: Equals
+                    value: ""
+                  - key: "{{ element.resources.limits.cpu || '' }}"
+                    operator: Equals
+                    value: ""
+                  - key: "{{ element.resources.limits.memory || '' }}"
+                    operator: Equals
+                    value: ""
