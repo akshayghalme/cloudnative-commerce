@@ -1,0 +1,93 @@
+# OpenTelemetry Auto-Instrumentation — injects tracing into application pods
+# without code changes (for supported languages).
+#
+# The OTel Operator watches for pods with the annotation:
+#   instrumentation.opentelemetry.io/inject-<language>: "true"
+# and injects an init container that configures the OTel SDK automatically.
+#
+# Supported languages: java, python, nodejs, dotnet, go (go requires manual SDK)
+#
+# For our services:
+# - product-api (Go): requires manual OTel SDK integration (Go doesn't support
+#   auto-instrumentation). The Go SDK is added in the application code.
+# - storefront (Node.js): auto-instrumentation via @opentelemetry/auto-instrumentations-node
+# - order-worker (Python): auto-instrumentation via opentelemetry-instrument
+#
+# All instrumented services send traces to the OTel Collector at:
+#   otel-collector-opentelemetry-collector.monitoring:4317
+
+---
+# Python auto-instrumentation for order-worker
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: python-instrumentation
+  namespace: commerce
+spec:
+  exporter:
+    endpoint: http://otel-collector-opentelemetry-collector.monitoring:4317
+  propagators:
+    - tracecontext
+    - baggage
+    - b3
+  sampler:
+    type: parentbased_traceidratio
+    argument: "1.0"  # 100% at the SDK — tail sampling happens at the collector
+  python:
+    env:
+      - name: OTEL_SERVICE_NAME
+        value: order-worker
+      - name: OTEL_RESOURCE_ATTRIBUTES
+        value: "service.namespace=commerce,deployment.environment=dev"
+      # Instrument common libraries automatically
+      - name: OTEL_PYTHON_DISABLED_INSTRUMENTATIONS
+        value: ""
+
+---
+# Node.js auto-instrumentation for storefront
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: nodejs-instrumentation
+  namespace: commerce
+spec:
+  exporter:
+    endpoint: http://otel-collector-opentelemetry-collector.monitoring:4317
+  propagators:
+    - tracecontext
+    - baggage
+    - b3
+  sampler:
+    type: parentbased_traceidratio
+    argument: "1.0"
+  nodejs:
+    env:
+      - name: OTEL_SERVICE_NAME
+        value: storefront
+      - name: OTEL_RESOURCE_ATTRIBUTES
+        value: "service.namespace=commerce,deployment.environment=dev"
+
+---
+# Go instrumentation config for product-api
+# Go does NOT support auto-instrumentation — the OTel SDK must be integrated
+# in the application code. This ConfigMap provides the configuration that
+# the Go SDK reads at startup.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-go-config
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: product-api
+    app.kubernetes.io/part-of: cloudnative-commerce
+data:
+  # Environment variables for the Go OTel SDK (set in deployment envFrom)
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.monitoring:4317"
+  OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+  OTEL_SERVICE_NAME: "product-api"
+  OTEL_RESOURCE_ATTRIBUTES: "service.namespace=commerce,deployment.environment=dev"
+  # Propagation format — W3C TraceContext is the standard
+  OTEL_PROPAGATORS: "tracecontext,baggage,b3"
+  # Sample 100% at SDK — tail sampling at the collector decides what to keep
+  OTEL_TRACES_SAMPLER: "parentbased_traceidratio"
+  OTEL_TRACES_SAMPLER_ARG: "1.0"
