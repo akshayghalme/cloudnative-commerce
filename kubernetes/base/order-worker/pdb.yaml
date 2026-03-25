@@ -1,0 +1,17 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: order-worker
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: order-worker
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: cloudnative-commerce
+spec:
+  # Keep at least 1 worker running during node drain.
+  # SQS messages become visible again after the visibility timeout
+  # if not acknowledged — no messages are lost, but processing pauses briefly.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: order-worker
