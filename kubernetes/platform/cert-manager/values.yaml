@@ -1,0 +1,74 @@
+# cert-manager Helm values
+# Chart: jetstack/cert-manager v1.16.3
+# Install: helm install cert-manager jetstack/cert-manager -n cert-manager --create-namespace -f values.yaml
+#
+# cert-manager automates TLS certificate provisioning and renewal.
+# It watches Ingress resources and Certificate CRDs, requests certs from
+# Let's Encrypt (or any ACME CA), and stores them as Kubernetes Secrets.
+# Without it, you'd manually generate certs and rotate them before expiry.
+
+# Install CRDs with Helm — simpler than applying them separately.
+# CRDs: Certificate, Issuer, ClusterIssuer, CertificateRequest, Order, Challenge
+crds:
+  enabled: true
+  keep: true  # Don't delete CRDs on helm uninstall (prevents cert loss)
+
+replicaCount: 2  # HA — cert-manager must be available for cert renewals
+
+# Pod disruption budget — keep at least 1 replica during node drains
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Resource requests/limits — cert-manager is lightweight but must not be evicted
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# Webhook — validates cert-manager CRDs at admission time
+webhook:
+  replicaCount: 2
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+# cainjector — injects CA bundles into webhook configurations
+cainjector:
+  replicaCount: 2
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 256Mi
+
+# Prometheus metrics — scraped by kube-prometheus-stack (Task 34)
+prometheus:
+  enabled: true
+  servicemonitor:
+    enabled: true
+    namespace: monitoring
+
+# Security context — non-root, read-only filesystem
+securityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Node affinity — prefer running on system nodes if available
+# tolerations and nodeSelector can be added for dedicated infra nodes

@@ -1,0 +1,55 @@
+# ClusterIssuer — Let's Encrypt ACME issuer available to all namespaces.
+#
+# Two issuers: staging (for testing, high rate limits, untrusted certs)
+# and production (trusted certs, strict rate limits).
+#
+# Always test with staging first. Let's Encrypt production has a limit of
+# 50 certificates per registered domain per week. Hitting the limit means
+# no new certs for 7 days.
+#
+# How it works:
+# 1. Ingress has annotation: cert-manager.io/cluster-issuer: letsencrypt-prod
+# 2. cert-manager sees the Ingress, creates a Certificate resource
+# 3. Certificate triggers an Order → Challenge (HTTP-01 via ingress-nginx)
+# 4. Let's Encrypt validates domain ownership, issues cert
+# 5. cert-manager stores cert in the Secret referenced by Ingress tls.secretName
+# 6. cert-manager auto-renews 30 days before expiry
+
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    # Let's Encrypt staging — untrusted certs, but no rate limits.
+    # Use this for initial setup and testing.
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: admin@cloudnative-commerce.dev
+    privateKeySecretRef:
+      name: letsencrypt-staging-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx
+
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    # Let's Encrypt production — trusted certs, rate-limited.
+    # Only switch to this after staging works correctly.
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@cloudnative-commerce.dev
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+      # HTTP-01 challenge: cert-manager creates a temporary Ingress to serve
+      # the ACME challenge token. Requires ingress-nginx to be reachable on
+      # port 80 from the internet.
+      - http01:
+          ingress:
+            ingressClassName: nginx
