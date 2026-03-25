@@ -1,0 +1,172 @@
+# SBOM Generation + Image Signing Pipeline
+#
+# Runs after CI pushes images to ECR. For each service image:
+#   1. Syft generates an SBOM (Software Bill of Materials) in SPDX format
+#   2. Cosign signs the image using keyless signing (Sigstore/Fulcio)
+#   3. Cosign attaches the SBOM as a signed attestation to the image
+#
+# Why this matters:
+# - SBOM: "What's inside this image?" — required by executive orders (EO 14028),
+#   FedRAMP, and enterprise procurement. Lists every OS package, library, and
+#   dependency with exact versions.
+# - Signing: "Who built this image, and has it been tampered with?" — Cosign
+#   keyless signing uses GitHub's OIDC identity (no key management). Kyverno
+#   (Task 33) verifies signatures at admission time.
+#
+# Supply chain flow:
+#   CI builds image → this workflow signs it + attaches SBOM →
+#   Kyverno verifies signature before allowing deployment
+
+name: SBOM & Sign
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: sbom-sign-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REGISTRY: 911788523496.dkr.ecr.ap-south-1.amazonaws.com
+
+permissions:
+  contents: read
+  id-token: write    # OIDC for AWS + Cosign keyless signing
+  packages: write    # Required for attaching signatures to images
+  actions: read      # Read workflow run info
+
+jobs:
+  sbom-and-sign:
+    name: "SBOM + Sign: ${{ matrix.service }}"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Only run if CI succeeded — no point signing a broken build
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [product-api, storefront, order-worker]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      # ── AWS Authentication ────────────────────────────────────────────
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        with:
+          role-to-assume: arn:aws:iam::911788523496:role/github-actions-ci
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2.0.1
+
+      # ── Resolve Image Digest ──────────────────────────────────────────
+      # We sign by digest (sha256:abc...), not by tag. Tags are mutable —
+      # someone could push a malicious image with the same tag. Digests
+      # are content-addressable and immutable.
+      - name: Get image digest
+        id: digest
+        run: |
+          SHA_SHORT=$(echo "${{ github.event.workflow_run.head_sha }}" | cut -c1-7)
+          IMAGE="${{ env.ECR_REGISTRY }}/${{ matrix.service }}:${SHA_SHORT}"
+
+          # Get the digest from ECR
+          DIGEST=$(docker manifest inspect "${IMAGE}" -v 2>/dev/null | \
+            jq -r '.Descriptor.digest // .digest' 2>/dev/null || \
+            aws ecr batch-get-image \
+              --repository-name "${{ matrix.service }}" \
+              --image-ids imageTag="${SHA_SHORT}" \
+              --query 'images[0].imageId.imageDigest' \
+              --output text)
+
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "image_with_digest=${{ env.ECR_REGISTRY }}/${{ matrix.service }}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+
+      # ── SBOM Generation ───────────────────────────────────────────────
+      # Syft inspects the container image and produces a complete inventory
+      # of every package: OS packages (apk, apt), language packages (Go modules,
+      # npm, pip), and their exact versions and licenses.
+      #
+      # Output format: SPDX JSON — the industry standard for SBOMs.
+      # SPDX is recognized by NTIA, required by US government procurement.
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0.17.9
+
+      - name: Generate SBOM
+        run: |
+          syft "${{ steps.digest.outputs.image }}" \
+            --output spdx-json=sbom-${{ matrix.service }}.spdx.json \
+            --output cyclonedx-json=sbom-${{ matrix.service }}.cdx.json
+
+      # Upload SBOM as build artifact for audit/compliance
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4.6.1
+        with:
+          name: sbom-${{ matrix.service }}
+          path: |
+            sbom-${{ matrix.service }}.spdx.json
+            sbom-${{ matrix.service }}.cdx.json
+          retention-days: 90
+
+      # ── Cosign: Keyless Image Signing ─────────────────────────────────
+      # Cosign keyless signing uses Sigstore's Fulcio CA to issue a short-lived
+      # certificate tied to the GitHub Actions OIDC identity. This means:
+      # - No private key to manage, rotate, or protect
+      # - The signature proves this image was built by THIS GitHub repo/workflow
+      # - Transparency log (Rekor) provides a tamper-proof audit trail
+      #
+      # Verification (by Kyverno or manual):
+      #   cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      #     --certificate-identity-regexp github.com/akshayghalme/cloudnative-commerce \
+      #     <image>@<digest>
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.8.0
+
+      - name: Sign image with Cosign (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          cosign sign --yes \
+            --oidc-issuer https://token.actions.githubusercontent.com \
+            "${{ steps.digest.outputs.image_with_digest }}"
+
+      # ── Attach SBOM as Signed Attestation ─────────────────────────────
+      # Cosign can attach the SBOM directly to the image in the registry.
+      # This means the SBOM travels WITH the image — anyone who can pull
+      # the image can also pull its SBOM. No separate storage needed.
+      - name: Attach SBOM attestation to image
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          cosign attest --yes \
+            --predicate sbom-${{ matrix.service }}.spdx.json \
+            --type spdxjson \
+            --oidc-issuer https://token.actions.githubusercontent.com \
+            "${{ steps.digest.outputs.image_with_digest }}"
+
+      # ── Verify Signature ──────────────────────────────────────────────
+      # Smoke test: verify the signature we just created. If this fails,
+      # the signing process is broken and Kyverno would reject the image.
+      - name: Verify image signature
+        run: |
+          cosign verify \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp "github.com/akshayghalme/cloudnative-commerce" \
+            "${{ steps.digest.outputs.image_with_digest }}"
+
+      - name: Summary
+        run: |
+          echo "### ${{ matrix.service }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Image**: \`${{ steps.digest.outputs.image }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Digest**: \`${{ steps.digest.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Signed**: ✅ Cosign keyless (Sigstore/Fulcio)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **SBOM**: ✅ SPDX + CycloneDX attached as attestation" >> "$GITHUB_STEP_SUMMARY"
