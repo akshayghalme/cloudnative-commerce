@@ -1,0 +1,166 @@
+# Chaos Experiment — Node Drain
+#
+# Hypothesis: "If a node is cordoned and drained (simulating node failure,
+# spot interruption, or maintenance), all pods are rescheduled to healthy
+# nodes within 2 minutes, and Karpenter provisions a replacement node if
+# capacity is insufficient. Zero user-visible errors during the transition."
+#
+# What this tests:
+# - Pod Disruption Budgets (PDBs) prevent all replicas from draining simultaneously
+# - Pod anti-affinity spreads replicas across nodes (not all on the drained node)
+# - Karpenter detects capacity shortage and launches a new node
+# - Services remain available throughout the drain/reschedule cycle
+# - Graceful shutdown handlers in application code work correctly
+#
+# This is more severe than pod-kill: it evicts ALL pods on a node and
+# simulates real infrastructure events (EC2 termination, spot reclaim).
+
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosExperiment
+metadata:
+  name: node-drain
+  namespace: commerce
+  labels:
+    app.kubernetes.io/part-of: cloudnative-commerce
+    app.kubernetes.io/component: chaos
+spec:
+  definition:
+    scope: Cluster
+    permissions:
+      - apiGroups: [""]
+        resources: ["pods", "pods/eviction", "pods/log"]
+        verbs: ["create", "delete", "get", "list", "patch"]
+      - apiGroups: [""]
+        resources: ["events"]
+        verbs: ["create", "get", "list", "patch", "update"]
+      - apiGroups: [""]
+        resources: ["nodes"]
+        verbs: ["get", "list", "watch", "patch", "update"]
+      - apiGroups: ["apps"]
+        resources: ["deployments", "replicasets"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: ["batch"]
+        resources: ["jobs"]
+        verbs: ["create", "list", "get", "delete"]
+      - apiGroups: ["litmuschaos.io"]
+        resources: ["chaosengines", "chaosexperiments", "chaosresults"]
+        verbs: ["create", "list", "get", "patch", "update", "delete"]
+    image: litmuschaos/go-runner:3.10.0
+    args:
+      - -c
+      - ./experiments -name node-drain
+    command:
+      - /bin/bash
+    env:
+      - name: TOTAL_CHAOS_DURATION
+        value: "120"
+      - name: APP_NAMESPACE
+        value: "commerce"
+      - name: APP_LABEL
+        value: "app.kubernetes.io/name=product-api"
+
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: node-drain-experiment
+  namespace: commerce
+  labels:
+    app.kubernetes.io/part-of: cloudnative-commerce
+    app.kubernetes.io/component: chaos
+    experiment: node-drain
+spec:
+  appinfo:
+    appns: commerce
+    applabel: app.kubernetes.io/name=product-api
+    appkind: deployment
+  engineState: active
+  chaosServiceAccount: litmus-chaos
+  experiments:
+    - name: node-drain
+      spec:
+        components:
+          env:
+            # Duration the node stays cordoned (seconds)
+            - name: TOTAL_CHAOS_DURATION
+              value: "120"
+            # Target a node running product-api pods
+            - name: APP_NAMESPACE
+              value: "commerce"
+            - name: APP_LABEL
+              value: "app.kubernetes.io/name=product-api"
+            # Drain target node selection — pick one node
+            - name: TARGET_NODE_COUNT
+              value: "1"
+          nodeSelector:
+            kubernetes.io/os: linux
+        probe:
+          # Probe 1: product-api remains responsive throughout drain
+          - name: product-api-health
+            type: httpProbe
+            httpProbe/inputs:
+              url: http://product-api.commerce.svc.cluster.local/healthz
+              method:
+                get:
+                  criteria: "=="
+                  responseCode: "200"
+            mode: Continuous
+            runProperties:
+              probeTimeout: "5s"
+              interval: "5s"
+              retry: 5
+              probePollingInterval: "2s"
+
+          # Probe 2: storefront remains responsive
+          - name: storefront-health
+            type: httpProbe
+            httpProbe/inputs:
+              url: http://storefront.commerce.svc.cluster.local/
+              method:
+                get:
+                  criteria: "=="
+                  responseCode: "200"
+            mode: Continuous
+            runProperties:
+              probeTimeout: "5s"
+              interval: "10s"
+              retry: 3
+              probePollingInterval: "3s"
+
+          # Probe 3: Error rate stays within SLO
+          - name: error-rate-slo
+            type: promProbe
+            promProbe/inputs:
+              endpoint: http://prometheus-kube-prometheus-prometheus.monitoring:9090
+              query: >-
+                sum(rate(http_requests_total{namespace="commerce", status=~"5.."}[2m]))
+                /
+                sum(rate(http_requests_total{namespace="commerce"}[2m]))
+              comparator:
+                type: float
+                criteria: "<="
+                value: "0.01"
+            mode: Continuous
+            runProperties:
+              probeTimeout: "10s"
+              interval: "15s"
+              retry: 2
+              probePollingInterval: "5s"
+
+          # Probe 4: Node count recovers (Karpenter provisions replacement)
+          - name: node-recovery
+            type: cmdProbe
+            cmdProbe/inputs:
+              command: >-
+                kubectl get nodes --no-headers | grep -c " Ready"
+              comparator:
+                type: int
+                criteria: ">="
+                value: "2"
+            mode: Edge
+            runProperties:
+              probeTimeout: "10s"
+              interval: "30s"
+              retry: 5
+              probePollingInterval: "10s"
