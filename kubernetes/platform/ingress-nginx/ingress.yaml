@@ -1,0 +1,67 @@
+# Ingress — routes external traffic to product-api and storefront.
+#
+# Traffic flow:
+#   Internet → NLB → ingress-nginx → Ingress rules → backend services
+#
+# TLS is terminated at ingress-nginx using a cert from cert-manager.
+# cert-manager watches this Ingress and auto-provisions a Let's Encrypt cert
+# based on the cluster-issuer annotation.
+#
+# Host-based routing:
+#   api.cloudnative-commerce.dev → product-api:80
+#   cloudnative-commerce.dev     → storefront:80
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: commerce-ingress
+  namespace: commerce
+  labels:
+    app.kubernetes.io/part-of: cloudnative-commerce
+    app.kubernetes.io/managed-by: kustomize
+  annotations:
+    # cert-manager: auto-provision TLS cert from Let's Encrypt
+    # Use letsencrypt-staging for testing, switch to letsencrypt-prod when ready
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+
+    # Rate limiting — 20 requests/second per IP, burst of 40
+    nginx.ingress.kubernetes.io/limit-rps: "20"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "2"
+
+    # CORS — allow storefront to call the API from browser
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://cloudnative-commerce.dev"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "Content-Type, Authorization"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - cloudnative-commerce.dev
+        - api.cloudnative-commerce.dev
+      secretName: commerce-tls  # cert-manager creates this Secret
+
+  rules:
+    # API backend — api.cloudnative-commerce.dev
+    - host: api.cloudnative-commerce.dev
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: product-api
+                port:
+                  number: 80
+
+    # Storefront — cloudnative-commerce.dev
+    - host: cloudnative-commerce.dev
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: storefront
+                port:
+                  number: 80
