@@ -3,6 +3,9 @@ kind: Kustomization
 
 resources:
   - ../../../base/product-api
+  # Argo Rollouts resources for canary deployment strategy
+  - rollout.yaml
+  - analysis-template.yaml
 
 patches:
   - patch: |-
