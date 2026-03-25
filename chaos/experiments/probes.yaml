@@ -1,0 +1,116 @@
+# Steady-State Probes — verify system health before, during, and after chaos.
+#
+# Probes are the "hypothesis" in chaos engineering:
+# "We believe that when we kill a product-api pod, the service will
+# remain available because HPA will create a replacement within 30s."
+#
+# If the probe fails, the experiment fails — meaning our resilience
+# assumption was wrong and we've found something to fix.
+#
+# These probes are referenced by ChaosEngine experiments.
+
+---
+# HTTP probe — verify the product-api endpoint is responding
+# Used by: pod-kill, node-drain, network-partition experiments
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chaos-probes
+  namespace: commerce
+  labels:
+    app.kubernetes.io/part-of: cloudnative-commerce
+    app.kubernetes.io/component: chaos
+data:
+  # Product API health probe — checks /healthz returns 200
+  product-api-health.json: |
+    {
+      "name": "product-api-health",
+      "type": "httpProbe",
+      "httpProbe/inputs": {
+        "url": "http://product-api.commerce.svc.cluster.local/healthz",
+        "method": {
+          "get": {
+            "criteria": "==",
+            "responseCode": "200"
+          }
+        }
+      },
+      "mode": "Continuous",
+      "runProperties": {
+        "probeTimeout": "5s",
+        "interval": "5s",
+        "retry": 3,
+        "probePollingInterval": "2s"
+      }
+    }
+
+  # Storefront health probe
+  storefront-health.json: |
+    {
+      "name": "storefront-health",
+      "type": "httpProbe",
+      "httpProbe/inputs": {
+        "url": "http://storefront.commerce.svc.cluster.local/",
+        "method": {
+          "get": {
+            "criteria": "==",
+            "responseCode": "200"
+          }
+        }
+      },
+      "mode": "Continuous",
+      "runProperties": {
+        "probeTimeout": "5s",
+        "interval": "5s",
+        "retry": 3,
+        "probePollingInterval": "2s"
+      }
+    }
+
+  # Prometheus query probe — verify error rate stays below SLO during chaos
+  # This is the most powerful probe: it checks the ACTUAL user impact,
+  # not just "is the pod running?" but "are users seeing errors?"
+  error-rate-probe.json: |
+    {
+      "name": "error-rate-slo",
+      "type": "promProbe",
+      "promProbe/inputs": {
+        "endpoint": "http://prometheus-kube-prometheus-prometheus.monitoring:9090",
+        "query": "sum(rate(http_requests_total{namespace='commerce', status=~'5..'}[1m])) / sum(rate(http_requests_total{namespace='commerce'}[1m]))",
+        "comparator": {
+          "type": "float",
+          "criteria": "<=",
+          "value": "0.01"
+        }
+      },
+      "mode": "Continuous",
+      "runProperties": {
+        "probeTimeout": "10s",
+        "interval": "10s",
+        "retry": 2,
+        "probePollingInterval": "5s"
+      }
+    }
+
+  # Kubernetes probe — verify minimum pod count during chaos
+  # Ensures HPA maintains at least 2 running pods
+  min-pods-probe.json: |
+    {
+      "name": "min-pods-running",
+      "type": "k8sProbe",
+      "k8sProbe/inputs": {
+        "group": "apps",
+        "version": "v1",
+        "resource": "deployments",
+        "namespace": "commerce",
+        "fieldSelector": "metadata.name=product-api",
+        "operation": "present"
+      },
+      "mode": "Continuous",
+      "runProperties": {
+        "probeTimeout": "5s",
+        "interval": "5s",
+        "retry": 3,
+        "probePollingInterval": "2s"
+      }
+    }
