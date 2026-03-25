@@ -1,0 +1,99 @@
+# Pre-commit hooks for cloudnative-commerce
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+#
+# These hooks run locally on every `git commit`, catching issues before
+# they reach CI. Fast feedback loop = fewer failed pipelines.
+
+default_stages: [commit]
+
+repos:
+  # -----------------------------------------------------------------------
+  # General hygiene — trailing whitespace, file endings, merge conflicts
+  # -----------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  # -----------------------------------------------------------------------
+  # Secret scanning — catches AWS keys, tokens, passwords before commit
+  # Gitleaks is the industry standard; used by GitHub's own secret scanning
+  # -----------------------------------------------------------------------
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+        name: gitleaks (secret scanning)
+
+  # -----------------------------------------------------------------------
+  # Dockerfile linting — enforces best practices (non-root, pinned tags, etc.)
+  # Hadolint is the de-facto Dockerfile linter, used in most CI pipelines
+  # -----------------------------------------------------------------------
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.12.0
+    hooks:
+      - id: hadolint-docker
+        name: hadolint (Dockerfile lint)
+        args:
+          # DL3008: pin apt package versions — good practice but noisy in dev
+          # DL3018: pin apk versions — same reason
+          - --ignore=DL3008
+          - --ignore=DL3018
+
+  # -----------------------------------------------------------------------
+  # YAML linting — consistent formatting across Kubernetes manifests,
+  # GitHub Actions workflows, docker-compose, Helm values
+  # -----------------------------------------------------------------------
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.35.1
+    hooks:
+      - id: yamllint
+        name: yamllint
+        args: [-c=.yamllint.yaml]
+
+  # -----------------------------------------------------------------------
+  # Terraform formatting — `terraform fmt` is non-negotiable in team settings
+  # -----------------------------------------------------------------------
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.92.1
+    hooks:
+      - id: terraform_fmt
+        name: terraform fmt
+
+  # -----------------------------------------------------------------------
+  # Python — order-worker service
+  # -----------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.8
+    hooks:
+      - id: ruff
+        name: ruff (Python lint)
+        files: ^services/order-worker/
+      - id: ruff-format
+        name: ruff-format (Python format)
+        files: ^services/order-worker/
+
+  # -----------------------------------------------------------------------
+  # Go — product-api service
+  # -----------------------------------------------------------------------
+  - repo: https://github.com/dnephin/pre-commit-golang
+    rev: v0.5.1
+    hooks:
+      - id: go-fmt
+        name: go fmt (product-api)
+        files: ^services/product-api/
+      - id: go-vet
+        name: go vet (product-api)
+        files: ^services/product-api/
