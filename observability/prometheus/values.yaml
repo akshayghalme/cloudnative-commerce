@@ -1,0 +1,265 @@
+# kube-prometheus-stack Helm values
+# Chart: prometheus-community/kube-prometheus-stack v65.8.0
+# Install: helm install prometheus prometheus-community/kube-prometheus-stack -n monitoring --create-namespace -f values.yaml
+#
+# This single chart deploys the entire monitoring stack:
+# - Prometheus (metrics collection + storage + alerting rules)
+# - Grafana (dashboards + visualization)
+# - Alertmanager (alert routing + deduplication + silencing)
+# - node-exporter (host-level metrics: CPU, memory, disk, network)
+# - kube-state-metrics (Kubernetes object metrics: pod status, deployments, etc.)
+# - Prometheus Operator (manages Prometheus via CRDs: ServiceMonitor, PrometheusRule)
+#
+# Why kube-prometheus-stack (not standalone Prometheus):
+# - Pre-configured recording rules for Kubernetes (node, pod, container metrics)
+# - Pre-built Grafana dashboards for cluster health
+# - Prometheus Operator CRDs let services declare their own scrape configs
+# - One helm install = full observability stack
+
+# ─── Global ──────────────────────────────────────────────────────────────
+fullnameOverride: prometheus
+
+# ─── Prometheus ──────────────────────────────────────────────────────────
+prometheus:
+  prometheusSpec:
+    # Retention — how long to keep metrics. 15 days is enough for
+    # dashboards and alerting. Long-term storage goes to Thanos/Mimir.
+    retention: 15d
+    retentionSize: 10GB
+
+    # Storage — persistent volume for metrics data. Without this,
+    # metrics are lost on pod restart. 50Gi holds ~15 days for a
+    # small-to-medium cluster.
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 50Gi
+
+    # Resource requests/limits — Prometheus is memory-hungry.
+    # Memory usage grows with number of time series (not request rate).
+    # ~500Mi per 100k active series.
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+
+    # Scrape interval — how often Prometheus scrapes targets.
+    # 30s is a good balance: fast enough for alerting, not so fast
+    # that it overloads the cluster with metric volume.
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+
+    # Service monitor selectors — scrape any ServiceMonitor in any namespace.
+    # This lets services opt-in to monitoring by creating a ServiceMonitor.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelector: {}
+    serviceMonitorNamespaceSelector: {}
+
+    # Pod monitor selectors — same approach for PodMonitors
+    podMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelector: {}
+    podMonitorNamespaceSelector: {}
+
+    # PrometheusRule selectors — load alerting rules from any namespace
+    ruleSelectorNilUsesHelmValues: false
+    ruleSelector: {}
+    ruleNamespaceSelector: {}
+
+    # Additional scrape configs — for targets without ServiceMonitors
+    # (e.g., NGINX ingress controller metrics, ArgoCD metrics)
+    additionalScrapeConfigs: []
+
+    # Security context
+    securityContext:
+      runAsNonRoot: true
+      fsGroup: 65534
+      seccompProfile:
+        type: RuntimeDefault
+
+  # Ingress for Prometheus UI (optional — usually accessed via port-forward)
+  ingress:
+    enabled: false
+
+# ─── Grafana ─────────────────────────────────────────────────────────────
+grafana:
+  # Admin credentials — in production, use external-secrets to inject these
+  adminUser: admin
+  # adminPassword is set via existing secret in production
+  # For dev, the chart generates a random password stored in a K8s Secret
+
+  # Persistent storage for Grafana dashboards and settings
+  persistence:
+    enabled: true
+    storageClassName: gp3
+    size: 10Gi
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Default dashboards — kube-prometheus-stack includes pre-built dashboards
+  # for cluster health, node metrics, pod metrics, etc.
+  defaultDashboardsEnabled: true
+  defaultDashboardsTimezone: UTC
+
+  # Data sources — Prometheus is auto-configured. Add Loki for logs (Task 36).
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      url: http://loki-gateway.monitoring:80
+      access: proxy
+      isDefault: false
+      jsonData:
+        maxLines: 1000
+
+  # Sidecar — auto-discovers ConfigMaps with dashboards and provisions them.
+  # Create a ConfigMap with label grafana_dashboard: "1" and Grafana loads it.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      # Search all namespaces for dashboard ConfigMaps
+      searchNamespace: ALL
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true
+    datasources:
+      enabled: true
+      label: grafana_datasource
+      searchNamespace: ALL
+
+  # Grafana ingress — expose Grafana UI externally
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-staging
+    hosts:
+      - grafana.cloudnative-commerce.dev
+    tls:
+      - secretName: grafana-tls
+        hosts:
+          - grafana.cloudnative-commerce.dev
+
+  # Grafana.ini configuration
+  grafana.ini:
+    server:
+      root_url: https://grafana.cloudnative-commerce.dev
+    # Anonymous access for read-only dashboards (useful for on-call)
+    auth.anonymous:
+      enabled: true
+      org_role: Viewer
+    # Security
+    security:
+      cookie_secure: true
+      strict_transport_security: true
+
+# ─── Alertmanager ────────────────────────────────────────────────────────
+alertmanager:
+  alertmanagerSpec:
+    # Storage for silences and notification state
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+  # Alertmanager config is managed separately (Task 39) for routing
+  # alerts to Slack/PagerDuty with proper severity-based routing.
+
+# ─── node-exporter ───────────────────────────────────────────────────────
+# Runs as a DaemonSet on every node. Exposes host-level metrics:
+# CPU usage, memory, disk I/O, network, filesystem.
+nodeExporter:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 64Mi
+
+# ─── kube-state-metrics ─────────────────────────────────────────────────
+# Single pod that watches the Kubernetes API and exposes object state as
+# metrics: pod phase, deployment replicas, node conditions, etc.
+kubeStateMetrics:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# ─── Prometheus Operator ─────────────────────────────────────────────────
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  # Admission webhooks — validates PrometheusRule and ServiceMonitor CRDs
+  admissionWebhooks:
+    enabled: true
+    patch:
+      enabled: true
+
+# ─── Default Alert Rules ────────────────────────────────────────────────
+# kube-prometheus-stack ships with comprehensive alerting rules.
+# Enable all of them — disable individual rules if too noisy.
+defaultRules:
+  create: true
+  rules:
+    alertmanager: true
+    etcd: true
+    configReloaders: true
+    general: true
+    k8s: true
+    kubeApiserverAvailability: true
+    kubeApiserverBurnrate: true
+    kubeApiserverHistogram: true
+    kubeApiserverSlos: true
+    kubeControllerManager: true
+    kubelet: true
+    kubeProxy: true
+    kubePrometheusGeneral: true
+    kubePrometheusNodeRecording: true
+    kubernetesApps: true
+    kubernetesResources: true
+    kubernetesStorage: true
+    kubernetesSystem: true
+    kubeSchedulerAlerting: true
+    kubeSchedulerRecording: true
+    kubeStateMetrics: true
+    network: true
+    node: true
+    nodeExporterAlerting: true
+    nodeExporterRecording: true
+    prometheus: true
+    prometheusOperator: true
