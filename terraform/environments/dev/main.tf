@@ -1,6 +1,6 @@
 # Dev environment — wires all modules together.
 # Each module is added as tasks are completed.
-# Current: VPC + EKS + RDS. ElastiCache added in Task 13.
+# Current: VPC + EKS + RDS + ElastiCache.
 
 locals {
   name   = "${var.project}-${var.environment}"
@@ -87,6 +87,32 @@ module "rds" {
   backup_retention_days = 7
   deletion_protection   = false
   skip_final_snapshot   = true
+
+  tags = local.tags
+}
+
+# ─── ElastiCache (Redis) ───────────────────────────────────────────────────────
+
+module "elasticache" {
+  source = "../../modules/elasticache"
+
+  name               = local.name
+  vpc_id             = module.vpc.vpc_id
+  private_subnet_ids = module.vpc.private_subnet_ids
+
+  # Only EKS nodes can reach Redis.
+  allowed_security_group_ids = [module.eks.node_security_group_id]
+
+  engine_version  = "7.1"
+  node_type       = "cache.t3.micro" # ~$12/month in dev
+  num_cache_nodes = 1
+
+  # Dev: encryption at rest, no TLS in transit (simplifies local debugging).
+  # In prod: set transit_encryption_enabled = true and provide auth_token.
+  at_rest_encryption_enabled = true
+  transit_encryption_enabled = false
+
+  snapshot_retention_limit = 1
 
   tags = local.tags
 }
