@@ -1,0 +1,39 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../../base/order-worker
+
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: order-worker
+        namespace: commerce
+      spec:
+        replicas: 3
+        template:
+          metadata:
+            labels:
+              app.kubernetes.io/version: PLACEHOLDER_GIT_SHA
+
+  - patch: |-
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: order-worker
+        namespace: commerce
+        annotations:
+          eks.amazonaws.com/role-arn: arn:aws:iam::911788523496:role/cloudnative-commerce-prod-order-worker-irsa
+
+  - patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: order-worker-config
+        namespace: commerce
+      data:
+        APP_ENV: "production"
+        SQS_QUEUE_URL: "https://sqs.ap-south-1.amazonaws.com/911788523496/cloudnative-commerce-prod-orders"
+        SQS_DLQ_URL: "https://sqs.ap-south-1.amazonaws.com/911788523496/cloudnative-commerce-prod-orders-dlq"
