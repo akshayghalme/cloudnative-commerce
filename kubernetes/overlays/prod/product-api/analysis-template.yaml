@@ -1,0 +1,74 @@
+# AnalysisTemplate — automated canary validation via Prometheus metrics.
+#
+# Argo Rollouts runs this analysis at each canary step. If any metric
+# fails its success condition, the rollout aborts automatically.
+#
+# Metrics checked:
+# 1. Error rate: percentage of 5xx responses must be < 1%
+# 2. P99 latency: 99th percentile response time must be < 500ms
+#
+# These are the two most important signals for API health:
+# - Error rate catches bugs (nil pointer, bad query, service crash)
+# - Latency catches performance regressions (N+1 query, missing index)
+
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: canary-analysis
+  namespace: commerce
+spec:
+  args:
+    - name: service-name
+  metrics:
+    # Metric 1: Error rate — must be below 1%
+    # Queries Prometheus for the ratio of 5xx responses to total responses
+    # over the last 5 minutes for the canary pods.
+    - name: error-rate
+      interval: 60s
+      count: 3           # Run 3 times (once per minute)
+      failureLimit: 1    # Fail if more than 1 measurement exceeds threshold
+      successCondition: "result[0] < 0.01"
+      provider:
+        prometheus:
+          address: http://prometheus-kube-prometheus-prometheus.monitoring:9090
+          query: |
+            sum(
+              rate(
+                http_requests_total{
+                  service="{{args.service-name}}",
+                  status=~"5..",
+                  rollouts_pod_template_hash="{{templates.podTemplateHash}}"
+                }[5m]
+              )
+            )
+            /
+            sum(
+              rate(
+                http_requests_total{
+                  service="{{args.service-name}}",
+                  rollouts_pod_template_hash="{{templates.podTemplateHash}}"
+                }[5m]
+              )
+            )
+
+    # Metric 2: P99 latency — must be below 500ms
+    # Queries the 99th percentile of request duration for canary pods.
+    - name: p99-latency
+      interval: 60s
+      count: 3
+      failureLimit: 1
+      successCondition: "result[0] < 0.5"
+      provider:
+        prometheus:
+          address: http://prometheus-kube-prometheus-prometheus.monitoring:9090
+          query: |
+            histogram_quantile(0.99,
+              sum(
+                rate(
+                  http_request_duration_seconds_bucket{
+                    service="{{args.service-name}}",
+                    rollouts_pod_template_hash="{{templates.podTemplateHash}}"
+                  }[5m]
+                )
+              ) by (le)
+            )
