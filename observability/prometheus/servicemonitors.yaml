@@ -1,0 +1,91 @@
+# ServiceMonitors — tell Prometheus how to scrape our application services.
+#
+# The Prometheus Operator watches for ServiceMonitor CRDs and auto-generates
+# the scrape configuration. This is better than static scrape_configs because:
+# - Services own their monitoring config (not a central Prometheus config)
+# - New services just create a ServiceMonitor — no Prometheus restart needed
+# - Labels and relabeling are declarative
+
+---
+# Product API — Go service exposing /metrics via promhttp
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: product-api
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: product-api
+    app.kubernetes.io/part-of: cloudnative-commerce
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: product-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      # Relabel: add service name as a label for PromQL queries
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_service_name]
+          targetLabel: service
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+  namespaceSelector:
+    matchNames:
+      - commerce
+
+---
+# Storefront — Next.js with custom metrics endpoint
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: storefront
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: storefront
+    app.kubernetes.io/part-of: cloudnative-commerce
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: storefront
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_service_name]
+          targetLabel: service
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+  namespaceSelector:
+    matchNames:
+      - commerce
+
+---
+# Order Worker — Python service with prometheus_client metrics
+# Note: order-worker has no K8s Service (it's an SQS consumer),
+# so we use a PodMonitor instead of ServiceMonitor.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: order-worker
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: order-worker
+    app.kubernetes.io/part-of: cloudnative-commerce
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: order-worker
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+  namespaceSelector:
+    matchNames:
+      - commerce
