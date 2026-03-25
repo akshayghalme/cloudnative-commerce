@@ -1,0 +1,131 @@
+# CD Pipeline — Dev Auto-Deploy
+#
+# Triggered after CI succeeds on main. Updates the container image tag in
+# the Kustomize dev overlay, commits the change, and lets ArgoCD sync it.
+#
+# This is the GitOps deployment pattern:
+#   1. CI builds image → pushes to ECR with SHA tag (e.g., abc1234)
+#   2. This workflow updates kubernetes/overlays/dev/*/kustomization.yaml
+#      to reference the new tag
+#   3. ArgoCD detects the Git change → syncs the new image to the cluster
+#
+# Why this approach (vs. kubectl set image or ArgoCD API):
+# - Git is the source of truth — the deploy is a Git commit, not an API call
+# - Full audit trail — `git log` shows exactly which image was deployed when
+# - Rollback is `git revert` — no special tooling needed
+# - ArgoCD's selfHeal ensures the cluster always matches Git
+
+name: CD Dev
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  # Only one deploy at a time — prevents race conditions on Git commits
+  group: cd-dev
+  cancel-in-progress: false
+
+env:
+  ECR_REGISTRY: 911788523496.dkr.ecr.ap-south-1.amazonaws.com
+
+permissions:
+  contents: write  # Push image tag update commits
+
+jobs:
+  update-image-tags:
+    name: "Update dev image tags"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Only deploy if CI succeeded
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+        with:
+          ref: main
+          # Use a token with push access — default GITHUB_TOKEN can't trigger
+          # other workflows (prevents infinite loops), which is what we want.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Kustomize
+        uses: imranismail/setup-kustomize@v2.1.0
+        with:
+          kustomize-version: "5.4.3"
+
+      # Determine the image tag from the CI run's commit SHA
+      - name: Generate image tag
+        id: tag
+        run: |
+          SHA_SHORT=$(echo "${{ github.event.workflow_run.head_sha }}" | cut -c1-7)
+          echo "sha_tag=${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "Image tag: ${SHA_SHORT}"
+
+      # Update each service's dev overlay to use the new image tag.
+      # `kustomize edit set image` modifies the kustomization.yaml to pin
+      # the container image to the new SHA tag.
+      #
+      # Before: image: 911788523496.dkr.ecr.ap-south-1.amazonaws.com/product-api:old123
+      # After:  image: 911788523496.dkr.ecr.ap-south-1.amazonaws.com/product-api:abc1234
+      - name: Update product-api image tag
+        run: |
+          cd kubernetes/overlays/dev/product-api
+          kustomize edit set image \
+            "${{ env.ECR_REGISTRY }}/product-api=${{ env.ECR_REGISTRY }}/product-api:${{ steps.tag.outputs.sha_tag }}"
+
+      - name: Update storefront image tag
+        run: |
+          cd kubernetes/overlays/dev/storefront
+          kustomize edit set image \
+            "${{ env.ECR_REGISTRY }}/storefront=${{ env.ECR_REGISTRY }}/storefront:${{ steps.tag.outputs.sha_tag }}"
+
+      - name: Update order-worker image tag
+        run: |
+          cd kubernetes/overlays/dev/order-worker
+          kustomize edit set image \
+            "${{ env.ECR_REGISTRY }}/order-worker=${{ env.ECR_REGISTRY }}/order-worker:${{ steps.tag.outputs.sha_tag }}"
+
+      # Commit and push the image tag update.
+      # This commit is what ArgoCD watches — when it sees the kustomization.yaml
+      # change, it syncs the new image to the cluster.
+      - name: Commit and push image tag update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Check if anything changed (might be a no-op if the same SHA)
+          if git diff --quiet; then
+            echo "No image tag changes — skipping commit"
+            exit 0
+          fi
+
+          git add kubernetes/overlays/dev/
+          git commit -m "$(cat <<EOF
+          deploy(dev): update image tags to ${{ steps.tag.outputs.sha_tag }}
+
+          Triggered by CI run #${{ github.event.workflow_run.run_number }}
+          Commit: ${{ github.event.workflow_run.head_sha }}
+
+          Images:
+          - product-api:${{ steps.tag.outputs.sha_tag }}
+          - storefront:${{ steps.tag.outputs.sha_tag }}
+          - order-worker:${{ steps.tag.outputs.sha_tag }}
+          EOF
+          )"
+          git push origin main
+
+      # Post a summary to the GitHub Actions run
+      - name: Summary
+        run: |
+          echo "### Dev Deploy" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Service | Image Tag |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---------|-----------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| product-api | \`${{ steps.tag.outputs.sha_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| storefront | \`${{ steps.tag.outputs.sha_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| order-worker | \`${{ steps.tag.outputs.sha_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "ArgoCD will sync these changes automatically (\`selfHeal: true\`)." >> "$GITHUB_STEP_SUMMARY"
