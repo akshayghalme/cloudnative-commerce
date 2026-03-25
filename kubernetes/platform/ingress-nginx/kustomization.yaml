@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# values.yaml is used with `helm install -f values.yaml`, not kustomize.
+# The Ingress resource is applied via kustomize after ingress-nginx is running.
+resources:
+  - ingress.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: cloudnative-commerce
+  app.kubernetes.io/managed-by: kustomize
+  app.kubernetes.io/component: ingress
