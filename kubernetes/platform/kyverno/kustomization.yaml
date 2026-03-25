@@ -6,6 +6,7 @@ resources:
   - restrict-registries.yaml
   - require-resource-limits.yaml
   - disallow-privileged.yaml
+  - verify-image-signatures.yaml
 
 commonLabels:
   app.kubernetes.io/part-of: cloudnative-commerce
