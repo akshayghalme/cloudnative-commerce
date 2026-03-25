@@ -1,0 +1,109 @@
+# SLO Recording + Alerting Rules — order-worker
+#
+# SLO: 99.9% message processing success rate.
+# The order-worker doesn't serve HTTP — its SLI is based on SQS message
+# processing success vs failure (custom metrics from the worker).
+# Error budget: 0.1% = ~43 minutes of failures per 30 days.
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: slo-order-worker
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: cloudnative-commerce
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: slo-order-worker-recording
+      interval: 30s
+      rules:
+        # SLI: message processing success rate
+        - record: slo:order_worker:success_rate:rate5m
+          expr: |
+            1 - (
+              sum(rate(order_messages_processed_total{service="order-worker", status="error"}[5m]))
+              /
+              sum(rate(order_messages_processed_total{service="order-worker"}[5m]))
+            )
+
+        - record: slo:order_worker:success_rate:rate1h
+          expr: |
+            1 - (
+              sum(rate(order_messages_processed_total{service="order-worker", status="error"}[1h]))
+              /
+              sum(rate(order_messages_processed_total{service="order-worker"}[1h]))
+            )
+
+        - record: slo:order_worker:success_rate:rate6h
+          expr: |
+            1 - (
+              sum(rate(order_messages_processed_total{service="order-worker", status="error"}[6h]))
+              /
+              sum(rate(order_messages_processed_total{service="order-worker"}[6h]))
+            )
+
+        # Queue depth — high depth means processing can't keep up
+        - record: slo:order_worker:queue_depth
+          expr: |
+            sum(order_queue_messages_visible{service="order-worker"})
+
+        - record: slo:order_worker:error_budget_remaining
+          expr: |
+            1 - (
+              (1 - slo:order_worker:success_rate:rate5m) / (1 - 0.999)
+            )
+
+    - name: slo-order-worker-alerts
+      rules:
+        - alert: OrderWorkerHighFailureBurnRate
+          expr: |
+            (
+              (1 - slo:order_worker:success_rate:rate1h) / (1 - 0.999) > 14.4
+              and
+              (1 - slo:order_worker:success_rate:rate5m) / (1 - 0.999) > 14.4
+            )
+          for: 2m
+          labels:
+            severity: critical
+            service: order-worker
+            slo: processing
+            team: platform
+          annotations:
+            summary: "order-worker message failure rate burning error budget 14.4x"
+            description: |
+              order-worker SLO (99.9% processing success) is being violated.
+              Check: DLQ depth, database connectivity, SQS message format.
+              Logs: {namespace="commerce", app="order-worker"} | level="error"
+
+        - alert: OrderWorkerMediumFailureBurnRate
+          expr: |
+            (
+              (1 - slo:order_worker:success_rate:rate6h) / (1 - 0.999) > 6
+              and
+              (1 - slo:order_worker:success_rate:rate1h) / (1 - 0.999) > 6
+            )
+          for: 5m
+          labels:
+            severity: warning
+            service: order-worker
+            slo: processing
+            team: platform
+          annotations:
+            summary: "order-worker sustained failure rate — 6x error budget burn"
+
+        # Queue depth alert — not SLO-based, but critical for operations
+        - alert: OrderWorkerQueueBacklog
+          expr: slo:order_worker:queue_depth > 1000
+          for: 10m
+          labels:
+            severity: warning
+            service: order-worker
+            team: platform
+          annotations:
+            summary: "order-worker queue depth > 1000 for 10 minutes"
+            description: |
+              SQS queue has a backlog of {{ $value }} messages.
+              Worker may be unable to keep up. Check: pod count, CPU limits,
+              database connection pool, downstream dependencies.
