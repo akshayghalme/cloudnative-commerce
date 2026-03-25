@@ -1,0 +1,28 @@
+# Default Deny — block all ingress and egress traffic in the commerce namespace.
+#
+# This is the foundation of zero-trust networking in Kubernetes. Without this,
+# every pod can talk to every other pod — a compromised container can reach
+# the database, other services, and the metadata API freely.
+#
+# With default-deny, traffic is blocked unless explicitly allowed by a
+# per-service NetworkPolicy. This inverts the security model: you must
+# declare what IS allowed, not what isn't.
+#
+# Requires a CNI that supports NetworkPolicy (Calico, Cilium, AWS VPC CNI
+# with network policy support enabled on EKS).
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: commerce
+  labels:
+    app.kubernetes.io/part-of: cloudnative-commerce
+    app.kubernetes.io/managed-by: kustomize
+    policy-type: baseline
+spec:
+  # Empty podSelector = matches ALL pods in the namespace
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
