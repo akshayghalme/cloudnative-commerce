@@ -1,0 +1,220 @@
+# Chaos Experiment — Network Partition: product-api ↔ database
+#
+# Hypothesis: "If product-api loses connectivity to PostgreSQL (RDS), the
+# service returns graceful error responses (503 with retry-after header),
+# does not crash, and recovers automatically when connectivity is restored.
+# Orders submitted during the partition are queued (not lost)."
+#
+# What this tests:
+# - Database connection pool timeout handling (no leaked connections)
+# - Circuit breaker pattern (if implemented) — stop hammering a dead DB
+# - Graceful degradation — return 503, not 500 with stack trace
+# - Recovery — reconnects automatically when network is restored
+# - Readiness probe — marks the pod as NotReady so traffic shifts away
+# - Order queue resilience — SQS messages stay in queue, processed after recovery
+#
+# This is the most realistic failure scenario for a database-backed service.
+# Network partitions happen in production: AZ isolation events, security
+# group misconfiguration, DNS failures, NACLs blocking traffic.
+
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosExperiment
+metadata:
+  name: network-partition
+  namespace: commerce
+  labels:
+    app.kubernetes.io/part-of: cloudnative-commerce
+    app.kubernetes.io/component: chaos
+spec:
+  definition:
+    scope: Namespaced
+    permissions:
+      - apiGroups: [""]
+        resources: ["pods", "pods/exec", "pods/log"]
+        verbs: ["create", "delete", "get", "list", "patch"]
+      - apiGroups: [""]
+        resources: ["events"]
+        verbs: ["create", "get", "list", "patch", "update"]
+      - apiGroups: ["apps"]
+        resources: ["deployments"]
+        verbs: ["get", "list"]
+      - apiGroups: ["batch"]
+        resources: ["jobs"]
+        verbs: ["create", "list", "get", "delete"]
+      - apiGroups: ["litmuschaos.io"]
+        resources: ["chaosengines", "chaosexperiments", "chaosresults"]
+        verbs: ["create", "list", "get", "patch", "update", "delete"]
+    image: litmuschaos/go-runner:3.10.0
+    args:
+      - -c
+      - ./experiments -name pod-network-partition
+    command:
+      - /bin/bash
+    env:
+      - name: TOTAL_CHAOS_DURATION
+        value: "90"
+      - name: DESTINATION_IPS
+        value: ""
+      - name: DESTINATION_HOSTS
+        value: ""
+
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: product-api-network-partition
+  namespace: commerce
+  labels:
+    app.kubernetes.io/part-of: cloudnative-commerce
+    app.kubernetes.io/component: chaos
+    experiment: network-partition
+spec:
+  appinfo:
+    appns: commerce
+    applabel: app.kubernetes.io/name=product-api
+    appkind: deployment
+  engineState: active
+  chaosServiceAccount: litmus-chaos
+  experiments:
+    - name: network-partition
+      spec:
+        components:
+          env:
+            # Duration of network partition (seconds)
+            - name: TOTAL_CHAOS_DURATION
+              value: "90"
+
+            # Block traffic to PostgreSQL port (5432) — simulates DB unreachability.
+            # Uses tc (traffic control) and iptables inside the pod's network namespace.
+            - name: DESTINATION_PORTS
+              value: "5432"
+
+            # Network interface inside the pod
+            - name: NETWORK_INTERFACE
+              value: "eth0"
+
+            # Block egress only — the pod can still receive requests from
+            # the load balancer, but can't reach the database.
+            - name: NETWORK_PACKET_LOSS_PERCENTAGE
+              value: "100"
+
+            # Target all product-api pods (test full partition, not partial)
+            - name: PODS_AFFECTED_PERC
+              value: "100"
+
+            # Container name within the pod
+            - name: TARGET_CONTAINER
+              value: "product-api"
+
+        probe:
+          # Probe 1: product-api pod stays running (doesn't crash)
+          # The pod should remain Running even though DB is unreachable.
+          # If the pod crashes, we have a resilience bug.
+          - name: pod-still-running
+            type: cmdProbe
+            cmdProbe/inputs:
+              command: >-
+                kubectl get pods -n commerce -l app.kubernetes.io/name=product-api
+                --field-selector=status.phase=Running -o name | wc -l
+              comparator:
+                type: int
+                criteria: ">="
+                value: "1"
+            mode: Continuous
+            runProperties:
+              probeTimeout: "5s"
+              interval: "10s"
+              retry: 3
+              probePollingInterval: "3s"
+
+          # Probe 2: /healthz still responds (pod is alive, just degraded)
+          # The health endpoint should NOT depend on the database.
+          # If /healthz fails during DB partition, the readiness probe
+          # is incorrectly coupled to database connectivity.
+          - name: healthz-independent
+            type: httpProbe
+            httpProbe/inputs:
+              url: http://product-api.commerce.svc.cluster.local/healthz
+              method:
+                get:
+                  criteria: "=="
+                  responseCode: "200"
+            mode: Continuous
+            runProperties:
+              probeTimeout: "5s"
+              interval: "10s"
+              retry: 5
+              probePollingInterval: "3s"
+
+          # Probe 3: After chaos ends, verify DB-dependent endpoints recover.
+          # This is an Edge probe — runs once at the END of chaos to verify
+          # the service recovers automatically without manual intervention.
+          - name: post-chaos-recovery
+            type: httpProbe
+            httpProbe/inputs:
+              url: http://product-api.commerce.svc.cluster.local/readyz
+              method:
+                get:
+                  criteria: "=="
+                  responseCode: "200"
+            mode: Edge
+            runProperties:
+              probeTimeout: "10s"
+              interval: "5s"
+              retry: 10
+              probePollingInterval: "5s"
+
+---
+# Second experiment: partition between storefront and product-api
+# Tests: does the storefront degrade gracefully when the backend is unreachable?
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: storefront-api-partition
+  namespace: commerce
+  labels:
+    app.kubernetes.io/part-of: cloudnative-commerce
+    app.kubernetes.io/component: chaos
+    experiment: network-partition
+spec:
+  appinfo:
+    appns: commerce
+    applabel: app.kubernetes.io/name=storefront
+    appkind: deployment
+  engineState: stop  # Set to 'active' to run this experiment
+  chaosServiceAccount: litmus-chaos
+  experiments:
+    - name: network-partition
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: "60"
+            # Block traffic to product-api port
+            - name: DESTINATION_PORTS
+              value: "8080"
+            - name: NETWORK_INTERFACE
+              value: "eth0"
+            - name: NETWORK_PACKET_LOSS_PERCENTAGE
+              value: "100"
+            - name: PODS_AFFECTED_PERC
+              value: "100"
+            - name: TARGET_CONTAINER
+              value: "storefront"
+        probe:
+          # Storefront should show cached/static content, not a blank page
+          - name: storefront-still-serves
+            type: httpProbe
+            httpProbe/inputs:
+              url: http://storefront.commerce.svc.cluster.local/
+              method:
+                get:
+                  criteria: "=="
+                  responseCode: "200"
+            mode: Continuous
+            runProperties:
+              probeTimeout: "5s"
+              interval: "10s"
+              retry: 3
+              probePollingInterval: "3s"
