@@ -1,0 +1,54 @@
+# Require Labels — every Pod must carry standard labels.
+#
+# Why: without enforced labels, dashboards break (Prometheus relabeling
+# depends on `app`), on-call can't identify owners, and cost allocation
+# by environment is impossible. Catching this at admission is cheaper
+# than chasing unlabeled workloads in production.
+#
+# Mode: Audit first, then switch validationFailureAction to Enforce
+# once all existing workloads comply.
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-labels
+  annotations:
+    policies.kyverno.io/title: Require Standard Labels
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Pods must have app.kubernetes.io/name, environment, and
+      app.kubernetes.io/managed-by labels for observability,
+      cost allocation, and ownership tracking.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-required-labels
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      # Exclude kube-system and kyverno namespaces — system pods don't
+      # follow application labeling conventions.
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - argocd
+                - karpenter
+      validate:
+        message: >-
+          Pod {{request.object.metadata.name}} in namespace
+          {{request.object.metadata.namespace}} is missing required labels.
+          All pods must have: app.kubernetes.io/name, environment,
+          app.kubernetes.io/managed-by.
+        pattern:
+          metadata:
+            labels:
+              app.kubernetes.io/name: "?*"
+              environment: "?*"
+              app.kubernetes.io/managed-by: "?*"

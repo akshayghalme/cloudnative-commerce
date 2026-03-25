@@ -1,0 +1,74 @@
+# Restrict Image Registries — only allow images from trusted sources.
+#
+# Why: pulling arbitrary images from Docker Hub or other public registries
+# is a supply chain attack vector. An attacker who compromises a public
+# image (typosquatting, account takeover) gets code execution in your
+# cluster. Restricting to known registries is the first line of defense.
+# Image signature verification (Task 33) adds a second layer.
+#
+# Allowed registries:
+# - Our ECR account (911788523496.dkr.ecr.ap-south-1.amazonaws.com)
+# - gcr.io/distroless (minimal base images with no shell/package manager)
+# - docker.io/library (official Docker images only — postgres, redis, nginx)
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-image-registries
+  annotations:
+    policies.kyverno.io/title: Restrict Image Registries
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Container images must come from approved registries: our ECR account,
+      gcr.io/distroless, or official Docker Hub images. Blocks unknown
+      registries to prevent supply chain attacks.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: validate-image-registry
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - argocd
+                - karpenter
+      validate:
+        message: >-
+          Image '{{request.object.spec.containers[].image}}' is from an
+          untrusted registry. Allowed registries: ECR (911788523496.dkr.ecr.ap-south-1.amazonaws.com),
+          gcr.io/distroless, docker.io/library.
+        foreach:
+          - list: "request.object.spec.[initContainers, containers][]"
+            deny:
+              conditions:
+                all:
+                  - key: "{{element.image}}"
+                    operator: NotEquals
+                    value: "911788523496.dkr.ecr.ap-south-1.amazonaws.com/*"
+                  - key: "{{element.image}}"
+                    operator: NotEquals
+                    value: "gcr.io/distroless/*"
+                  - key: "{{element.image}}"
+                    operator: NotEquals
+                    value: "docker.io/library/*"
+                  - key: "{{element.image}}"
+                    operator: NotEquals
+                    value: "library/*"
+                  - key: "{{element.image}}"
+                    operator: NotEquals
+                    value: "postgres:*"
+                  - key: "{{element.image}}"
+                    operator: NotEquals
+                    value: "redis:*"
+                  - key: "{{element.image}}"
+                    operator: NotEquals
+                    value: "nginx:*"
