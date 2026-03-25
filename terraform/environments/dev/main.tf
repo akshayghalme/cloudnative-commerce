@@ -1,6 +1,6 @@
 # Dev environment — wires all modules together.
 # Each module is added as tasks are completed.
-# Current: VPC + EKS. RDS, ElastiCache added in Tasks 12–13.
+# Current: VPC + EKS + RDS. ElastiCache added in Task 13.
 
 locals {
   name   = "${var.project}-${var.environment}"
@@ -57,6 +57,36 @@ module "eks" {
   cluster_endpoint_private_access      = true
   cluster_endpoint_public_access       = true
   cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"]
+
+  tags = local.tags
+}
+
+# ─── RDS ──────────────────────────────────────────────────────────────────────
+
+module "rds" {
+  source = "../../modules/rds"
+
+  name               = local.name
+  vpc_id             = module.vpc.vpc_id
+  private_subnet_ids = module.vpc.private_subnet_ids
+  vpc_cidr_block     = module.vpc.vpc_cidr_block
+
+  # Only EKS nodes can reach the database.
+  allowed_security_group_ids = [module.eks.node_security_group_id]
+
+  engine_version           = "16.3"
+  instance_class           = "db.t3.micro" # ~$13/month in dev
+  allocated_storage_gb     = 20
+  max_allocated_storage_gb = 100
+
+  database_name     = "commerce"
+  database_username = "commerce_admin"
+
+  # Dev: no Multi-AZ (saves ~$13/month), 7-day backups, no deletion protection.
+  multi_az              = false
+  backup_retention_days = 7
+  deletion_protection   = false
+  skip_final_snapshot   = true
 
   tags = local.tags
 }
