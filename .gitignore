@@ -10,6 +10,10 @@
 !*.tfvars.example
 .terraform.lock.hcl
 
+# Terragrunt cache — generated files, not source of truth
+**/.terragrunt-cache/
+**/provider_generated.tf
+
 # Build artifacts
 services/product-api/product-api
 services/storefront/.next/
