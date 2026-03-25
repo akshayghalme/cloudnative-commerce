@@ -165,6 +165,25 @@ compose-ps: ## Show status of all local containers
 compose-restart: ## Restart all services (useful after config changes)
 	docker compose -f $(COMPOSE_FILE) restart
 
+# ─── Terraform ───────────────────────────────────────────────────────────────
+
+bootstrap-backend: ## Create S3 + DynamoDB for Terraform remote state (run once)
+	@echo "→ Bootstrapping Terraform backend..."
+	chmod +x terraform/environments/dev/bootstrap.sh
+	bash terraform/environments/dev/bootstrap.sh
+
+tf-init: ## Run terraform init in dev environment
+	cd terraform/environments/dev && terraform init
+
+tf-plan: ## Run terraform plan in dev environment
+	cd terraform/environments/dev && terraform plan
+
+tf-apply: ## Run terraform apply in dev environment (requires confirmation)
+	cd terraform/environments/dev && terraform apply
+
+tf-destroy: ## Destroy dev environment (DESTRUCTIVE — prompts for confirmation)
+	cd terraform/environments/dev && terraform destroy
+
 # ─── Pre-commit ───────────────────────────────────────────────────────────────
 
 pre-commit-install: ## Install pre-commit hooks into .git/hooks
