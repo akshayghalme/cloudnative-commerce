@@ -1,0 +1,150 @@
+# OpenTelemetry Collector Helm values
+# Chart: open-telemetry/opentelemetry-collector v0.108.0
+# Install: helm install otel-collector open-telemetry/opentelemetry-collector -n monitoring -f values-collector.yaml
+#
+# The OTel Collector is the central telemetry pipeline — it receives traces
+# (and optionally metrics/logs) from application SDKs, processes them
+# (batching, sampling, enrichment), and exports to storage backends.
+#
+# Why a collector (vs sending directly to Tempo):
+# - Decouples apps from backends — switch from Tempo to Jaeger without code changes
+# - Tail-based sampling — decide to keep/drop a trace AFTER seeing all spans
+# - Batching — reduces network overhead from many small exports
+# - Enrichment — add Kubernetes metadata (node, namespace, pod) to spans
+
+mode: deployment
+replicaCount: 2
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# ─── Collector Pipeline Configuration ──────────────────────────────────
+config:
+  # Receivers — how traces enter the collector
+  receivers:
+    otlp:
+      protocols:
+        # gRPC is the primary protocol — higher throughput, lower overhead
+        grpc:
+          endpoint: 0.0.0.0:4317
+        # HTTP fallback — for environments where gRPC is blocked
+        http:
+          endpoint: 0.0.0.0:4318
+
+  # Processors — transform telemetry data in the pipeline
+  processors:
+    # Batch processor — groups spans into batches before export.
+    # Reduces export overhead: 1 batch of 1000 spans vs 1000 individual exports.
+    batch:
+      send_batch_size: 1024
+      send_batch_max_size: 2048
+      timeout: 5s
+
+    # Memory limiter — prevents the collector from OOM-killing itself.
+    # If memory exceeds limit_mib, the collector starts dropping data
+    # (better to lose some traces than crash and lose all).
+    memory_limiter:
+      check_interval: 5s
+      limit_mib: 800
+      spike_limit_mib: 200
+
+    # Resource processor — add Kubernetes metadata to all spans.
+    # This enrichment lets you filter traces by namespace, node, or deployment.
+    resource:
+      attributes:
+        - key: environment
+          value: dev
+          action: upsert
+        - key: cluster
+          value: commerce-dev
+          action: upsert
+
+    # Tail sampling — make sampling decisions after seeing all spans in a trace.
+    # Keep 100% of error traces and 10% of successful traces.
+    # This is more useful than head-based sampling (random 10%) because
+    # you always capture the traces that matter (errors, slow requests).
+    tail_sampling:
+      decision_wait: 10s
+      num_traces: 50000
+      policies:
+        # Always keep traces with errors
+        - name: errors-policy
+          type: status_code
+          status_code:
+            status_codes: [ERROR]
+        # Always keep traces slower than 1 second
+        - name: latency-policy
+          type: latency
+          latency:
+            threshold_ms: 1000
+        # Sample 10% of remaining (healthy, fast) traces
+        - name: probabilistic-policy
+          type: probabilistic
+          probabilistic:
+            sampling_percentage: 10
+
+  # Exporters — where processed telemetry goes
+  exporters:
+    # Tempo — Grafana's trace storage backend
+    otlp/tempo:
+      endpoint: tempo.monitoring:4317
+      tls:
+        insecure: true
+
+    # Debug exporter — logs a sample of traces to stdout (useful for troubleshooting)
+    debug:
+      verbosity: basic
+      sampling_initial: 5
+      sampling_thereafter: 200
+
+  # Service pipeline — connects receivers → processors → exporters
+  service:
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, resource, tail_sampling, batch]
+        exporters: [otlp/tempo, debug]
+
+    # Collector's own telemetry — monitor the monitor
+    telemetry:
+      logs:
+        level: info
+      metrics:
+        address: 0.0.0.0:8888
+
+# ─── Service ───────────────────────────────────────────────────────────
+# Expose the collector as a ClusterIP service so apps can send traces to
+# otel-collector.monitoring:4317 (gRPC) or :4318 (HTTP)
+service:
+  type: ClusterIP
+
+ports:
+  otlp:
+    enabled: true
+    containerPort: 4317
+    servicePort: 4317
+    protocol: TCP
+  otlp-http:
+    enabled: true
+    containerPort: 4318
+    servicePort: 4318
+    protocol: TCP
+  metrics:
+    enabled: true
+    containerPort: 8888
+    servicePort: 8888
+    protocol: TCP
+
+# ─── Monitoring ────────────────────────────────────────────────────────
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
