@@ -1,0 +1,205 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "annotations": { "list": [] },
+  "description": "Resource usage mapped to estimated AWS cost — identify over-provisioned workloads and optimization opportunities",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Cost Overview",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "title": "Estimated Compute Cost ($/hr)",
+      "description": "Estimated cost based on CPU allocatable × on-demand t3.medium price ($0.0416/hr per vCPU in ap-south-1).",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2
+        }
+      },
+      "targets": [
+        { "expr": "sum(kube_node_status_allocatable{resource=\"cpu\"}) * 0.0416" }
+      ]
+    },
+    {
+      "title": "CPU Utilization Efficiency",
+      "description": "Actual CPU usage / CPU requested. Low values mean over-provisioning (wasted cost).",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0, "max": 1,
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.3 },
+              { "color": "green", "value": 0.6 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        { "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"commerce\", container!=\"\"}[5m])) / sum(kube_pod_container_resource_requests{namespace=\"commerce\", resource=\"cpu\"})" }
+      ]
+    },
+    {
+      "title": "Memory Utilization Efficiency",
+      "description": "Actual memory usage / memory requested. Target: 60-80%.",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0, "max": 1,
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.3 },
+              { "color": "green", "value": 0.6 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        { "expr": "sum(container_memory_working_set_bytes{namespace=\"commerce\", container!=\"\"}) / sum(kube_pod_container_resource_requests{namespace=\"commerce\", resource=\"memory\"})" }
+      ]
+    },
+    {
+      "title": "Nodes Running",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "count(kube_node_info)", "legendFormat": "Nodes" }
+      ]
+    },
+    {
+      "title": "Per-Service Resource Efficiency",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "collapsed": false
+    },
+    {
+      "title": "CPU: Requested vs Actual (by service)",
+      "description": "Gap between requested and actual CPU — large gaps = money wasted on unused compute.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 15 } } },
+      "targets": [
+        {
+          "expr": "sum(kube_pod_container_resource_requests{namespace=\"commerce\", resource=\"cpu\"}) by (container)",
+          "legendFormat": "{{ container }} requested"
+        },
+        {
+          "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"commerce\", container!=\"\"}[5m])) by (container)",
+          "legendFormat": "{{ container }} actual"
+        }
+      ]
+    },
+    {
+      "title": "Memory: Requested vs Actual (by service)",
+      "description": "Gap between requested and actual memory usage.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "lineWidth": 2, "fillOpacity": 15 } } },
+      "targets": [
+        {
+          "expr": "sum(kube_pod_container_resource_requests{namespace=\"commerce\", resource=\"memory\"}) by (container)",
+          "legendFormat": "{{ container }} requested"
+        },
+        {
+          "expr": "sum(container_memory_working_set_bytes{namespace=\"commerce\", container!=\"\"}) by (container)",
+          "legendFormat": "{{ container }} actual"
+        }
+      ]
+    },
+    {
+      "title": "Optimization Opportunities",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "collapsed": false
+    },
+    {
+      "title": "Over-Provisioned Containers (CPU)",
+      "description": "Containers using < 30% of requested CPU — candidates for right-sizing.",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"commerce\", container!=\"\"}[1h])) by (container, pod) / sum(kube_pod_container_resource_requests{namespace=\"commerce\", resource=\"cpu\"}) by (container, pod) < 0.3",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        { "id": "organize", "options": { "renameByName": { "Value": "Usage Ratio", "container": "Container", "pod": "Pod" } } }
+      ]
+    },
+    {
+      "title": "Over-Provisioned Containers (Memory)",
+      "description": "Containers using < 30% of requested memory — candidates for right-sizing.",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(container_memory_working_set_bytes{namespace=\"commerce\", container!=\"\"}) by (container, pod) / sum(kube_pod_container_resource_requests{namespace=\"commerce\", resource=\"memory\"}) by (container, pod) < 0.3",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        { "id": "organize", "options": { "renameByName": { "Value": "Usage Ratio", "container": "Container", "pod": "Pod" } } }
+      ]
+    },
+    {
+      "title": "Estimated Monthly Cost by Namespace",
+      "description": "Estimated cost based on CPU requests × t3.medium on-demand price × 730 hours/month.",
+      "type": "bargauge",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 23 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 0,
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(kube_pod_container_resource_requests{resource=\"cpu\"}) by (namespace) * 0.0416 * 730",
+          "legendFormat": "{{ namespace }}"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["cost", "finops", "optimization"],
+  "templating": { "list": [] },
+  "time": { "from": "now-24h", "to": "now" },
+  "title": "Cost & Resource Efficiency",
+  "uid": "cost-dashboard",
+  "version": 1
+}
