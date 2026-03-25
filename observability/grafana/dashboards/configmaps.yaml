@@ -1,0 +1,49 @@
+# Grafana Dashboard ConfigMaps — auto-provisioned by the Grafana sidecar.
+#
+# The sidecar watches for ConfigMaps with label `grafana_dashboard: "1"`
+# and loads the JSON into Grafana automatically. No manual import needed.
+#
+# The `grafana_folder` annotation controls which Grafana folder the
+# dashboard appears in — keeps dashboards organized.
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-golden-signals
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Commerce"
+data:
+  golden-signals.json: |-
+    ${GOLDEN_SIGNALS_JSON}
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-cluster-health
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Infrastructure"
+data:
+  cluster-health.json: |-
+    ${CLUSTER_HEALTH_JSON}
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-cost
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "FinOps"
+data:
+  cost-dashboard.json: |-
+    ${COST_DASHBOARD_JSON}
