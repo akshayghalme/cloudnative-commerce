@@ -45,6 +45,47 @@ Manages the full lifecycle from provisioning to observability to chaos resilienc
 | `staging` | Pre-prod validation, load testing | Yes — after dev passes |
 | `prod` | Production | Manual approval gate |
 
+## Progress
+
+| Layer | Status |
+|-------|--------|
+| Application (Go, React, Python) | :green_circle: Complete |
+| Infrastructure as Code (Terraform, Terragrunt) | :green_circle: Complete |
+| Kubernetes + GitOps (EKS, ArgoCD, Kustomize) | :green_circle: Complete |
+| CI/CD + Supply Chain Security | :green_circle: Complete |
+| Observability (Prometheus, Grafana, Loki, OTel) | :green_circle: Complete |
+| Chaos + Reliability (Litmus, k6) | :yellow_circle: In progress |
+
+## Observability Stack
+
+**Metrics → Logs → Traces** — all accessible in a single Grafana instance.
+
+| Component | Tool | Purpose |
+|-----------|------|---------|
+| Metrics | Prometheus + kube-prometheus-stack | Cluster + application metrics, 15d retention |
+| Dashboards | Grafana | Golden signals, cluster health, cost/efficiency |
+| Logging | Loki + Promtail | Label-indexed log aggregation, 14d retention |
+| Tracing | OpenTelemetry Collector + Tempo | Distributed traces with tail-based sampling |
+| Alerting | Alertmanager | Severity-based routing to PagerDuty + Slack |
+
+### Grafana Dashboards
+
+| Dashboard | What it shows |
+|-----------|--------------|
+| **Golden Signals** | Request rate, error rate, P50/P95/P99 latency, CPU/memory saturation per service |
+| **Cluster Health** | Node readiness, pod count/restarts, CPU/memory/disk per node, deployment availability |
+| **Cost & Efficiency** | Resource utilization efficiency, requested vs actual, over-provisioned container detection |
+
+### SLO-Based Alerting (Google SRE Model)
+
+Alerts fire based on **error budget burn rate**, not raw thresholds:
+
+| Burn Rate | Time to Budget Exhaustion | Severity | Action |
+|-----------|--------------------------|----------|--------|
+| 14.4x | ~2 days | Critical | Page on-call immediately |
+| 6x | ~5 days | Warning | Investigate within hours |
+| 3x | ~10 days | Info | Investigate this week |
+
 ## Runbooks
 
 - [Scale-up procedure](docs/runbooks/scale-up.md)
