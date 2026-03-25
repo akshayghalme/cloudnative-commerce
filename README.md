@@ -54,7 +54,7 @@ Manages the full lifecycle from provisioning to observability to chaos resilienc
 | Kubernetes + GitOps (EKS, ArgoCD, Kustomize) | :green_circle: Complete |
 | CI/CD + Supply Chain Security | :green_circle: Complete |
 | Observability (Prometheus, Grafana, Loki, OTel) | :green_circle: Complete |
-| Chaos + Reliability (Litmus, k6) | :yellow_circle: In progress |
+| Chaos + Reliability (Litmus, k6) | :green_circle: Complete |
 
 ## Observability Stack
 
@@ -86,6 +86,19 @@ Alerts fire based on **error budget burn rate**, not raw thresholds:
 | 6x | ~5 days | Warning | Investigate within hours |
 | 3x | ~10 days | Info | Investigate this week |
 
+## Cost
+
+Estimated monthly AWS cost: **~$238/mo** (dev) | **~$470/mo** (prod)
+
+[Full cost analysis with optimization strategies](docs/cost-analysis.md)
+
+| Top costs (dev) | Monthly | Optimization |
+|-----------------|---------|-------------|
+| EKS control plane | $73 | Fixed — unavoidable |
+| EC2 nodes | $73 | Spot instances save ~$50/mo |
+| NAT Gateway | $33 | Single AZ (saves $65 vs HA) |
+| Platform overhead | $57 | Cost of production-grade ops |
+
 ## Runbooks
 
 - [Scale-up procedure](docs/runbooks/scale-up.md)
@@ -113,11 +126,18 @@ Alerts fire based on **error budget burn rate**, not raw thresholds:
 
 ## Chaos Engineering
 
-| Experiment | Steady State | Last Run | Report |
-|-----------|--------------|----------|--------|
-| Pod kill — product-api | HPA recovers < 30s | — | — |
-| Node drain | Karpenter replaces < 2min | — | — |
-| Network partition | Orders queue, no data loss | — | — |
+| Experiment | Hypothesis | Probes | Report |
+|-----------|-----------|--------|--------|
+| [Pod kill](chaos/experiments/pod-kill-product-api.yaml) | HPA recovers < 30s, zero errors | HTTP health, Prometheus SLO, min pods | [Game Day #001](chaos/game-days/001-pod-kill-report.md) |
+| [Node drain](chaos/experiments/node-drain.yaml) | Karpenter replaces < 2min, PDB respected | HTTP health (both services), SLO, node count | [Game Day #002](chaos/game-days/002-node-drain-report.md) |
+| [Network partition](chaos/experiments/network-partition.yaml) | Graceful degradation, auto-recovery | Pod survival, healthz independence, post-chaos recovery | — |
+
+### Load Testing (k6)
+
+| Test | Pattern | Thresholds |
+|------|---------|-----------|
+| [API throughput](chaos/load-tests/k6-product-api.js) | 10 → 100 → 200 VUs, staged ramp | P95 < 300ms, P99 < 500ms, errors < 1% |
+| [Order flow](chaos/load-tests/k6-order-flow.js) | 10 orders/s steady + 50 orders/s flash sale | E2E P95 < 2s, order creation P95 < 500ms |
 
 ## Local Development
 
@@ -157,3 +177,55 @@ cloudnative-commerce/
 ├── chaos/              # Litmus experiments, k6 load tests, game day reports
 └── docs/               # ADRs, runbooks, failure reports, cost analysis
 ```
+
+## What I Learned
+
+### The hard parts nobody warns you about
+
+**Kubernetes YAML is the easy part. The hard part is the decisions between the YAML.**
+Choosing between ArgoCD and Flux, Kyverno and OPA, Loki and ELK — these choices
+shape your operational experience for years. I documented every decision as an ADR
+because "we use ArgoCD" is not useful without "here's why, and here's what we gave up."
+
+**Platform overhead is real.** Prometheus, Grafana, Loki, ArgoCD, Kyverno, cert-manager,
+external-secrets, ingress-nginx, Karpenter — these "free" open-source tools consume
+~3.2 vCPU and 5 GiB of memory. That's 1.5 t3.medium nodes ($57/mo) just for
+infrastructure. Production-grade is not free, even when the software is.
+
+**Security is a supply chain problem.** Image scanning (Trivy) catches known CVEs.
+Image signing (Cosign) proves who built it. SBOM generation (Syft) proves what's inside.
+Kyverno verification ensures only signed images deploy. Each tool covers one gap —
+skip any one and you have a hole.
+
+### What surprised me
+
+**NAT Gateway costs more than the database.** A single NAT Gateway is $33/mo. HA
+(three, one per AZ) is $99/mo. The RDS instance is $15/mo. Network egress pricing
+is the silent budget killer in AWS.
+
+**SLO-based alerting is a paradigm shift.** Traditional alerts ("error rate > 1%")
+fire on transient spikes and cause alert fatigue. Burn-rate alerts ("at this rate,
+we'll exhaust our error budget in 2 days") only fire when there's a real problem
+worth waking someone up for. Multi-window confirmation eliminates nearly all false
+positives.
+
+**Chaos engineering reveals what monitoring misses.** Our network partition experiment
+tests something no dashboard can show: "does the application crash when the database
+is unreachable, or does it degrade gracefully?" You can't answer that by looking at
+Grafana — you have to break things intentionally.
+
+### What I'd do differently
+
+**Start with the CI/CD pipeline earlier.** I built all the infrastructure before
+the pipelines. In a real project, I'd set up the CI pipeline in week 1 — even if
+it only runs `terraform fmt` and `docker build`. Feedback loops compound.
+
+**Use Helm for everything or Kustomize for everything, not both.** Platform
+components use Helm values files. Application manifests use Kustomize overlays.
+This works, but it means two deployment patterns to understand. Next time, I'd
+pick one and commit.
+
+**Add PgBouncer from day one.** Connection pool exhaustion is the most common
+database failure mode for Kubernetes workloads. Each pod opens its own pool,
+and with HPA scaling pods up/down, the connection count fluctuates wildly.
+A PgBouncer sidecar or standalone proxy should be part of the base architecture.
