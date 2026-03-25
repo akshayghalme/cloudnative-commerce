@@ -1,0 +1,77 @@
+# Grafana Tempo Helm values
+# Chart: grafana/tempo v1.14.0
+# Install: helm install tempo grafana/tempo -n monitoring -f values-tempo.yaml
+#
+# Tempo is a distributed tracing backend — it stores and queries traces.
+# Like Loki for logs, Tempo is designed for cost efficiency:
+# - Stores traces as compressed objects (no indexing of span content)
+# - Queries by trace ID are fast (direct lookup)
+# - Search uses Tempo's search backend (tag-based, not full-text)
+#
+# Why Tempo (not Jaeger):
+# - Native Grafana integration — traces alongside metrics and logs
+# - TraceQL — powerful trace query language in Grafana
+# - Same storage model as Loki — scales cheaply
+# - Maintained by Grafana Labs (same team as Loki, Prometheus, Grafana)
+
+tempo:
+  # Retention — keep traces for 7 days.
+  # Traces are more expensive per-unit than metrics/logs, and most
+  # investigation happens within hours of an incident.
+  retention: 168h  # 7 days
+
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+      wal:
+        path: /var/tempo/wal
+
+  # Receivers — accept OTLP traces from the OTel Collector
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+
+  # Metrics generator — derives RED metrics from traces.
+  # This creates Prometheus metrics (request rate, error rate, duration)
+  # from trace data — so even if you don't instrument custom metrics,
+  # you get golden signals for free from traces.
+  metricsGenerator:
+    enabled: true
+    remoteWriteUrl: http://prometheus-kube-prometheus-prometheus.monitoring:9090/api/v1/write
+    processor:
+      service_graphs:
+        enabled: true
+        dimensions: [service, namespace]
+      span_metrics:
+        enabled: true
+        dimensions: [service, namespace, status_code, http_method]
+
+  # Global overrides
+  overrides:
+    defaults:
+      metrics_generator:
+        processors: [service-graphs, span-metrics]
+
+# Persistence
+persistence:
+  enabled: true
+  storageClassName: gp3
+  size: 30Gi
+
+# Resources
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+# Monitoring
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
