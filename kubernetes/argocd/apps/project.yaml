@@ -1,0 +1,64 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: commerce
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: CloudNative Commerce platform services
+
+  # Only allow deployments from this repository.
+  # Prevents someone from creating an ArgoCD Application that deploys
+  # from an untrusted source into our cluster.
+  sourceRepos:
+    - https://github.com/akshayghalme/cloudnative-commerce
+
+  # Only allow deploying to the commerce namespace on the local cluster.
+  # Prevents cross-namespace or cross-cluster privilege escalation.
+  destinations:
+    - namespace: commerce
+      server: https://kubernetes.default.svc
+    - namespace: argocd
+      server: https://kubernetes.default.svc
+
+  # Allowed resource types — explicit allowlist is more secure than wildcard.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+
+  namespaceResourceWhitelist:
+    - group: "apps"
+      kind: Deployment
+    - group: "apps"
+      kind: ReplicaSet
+    - group: ""
+      kind: Service
+    - group: ""
+      kind: ServiceAccount
+    - group: ""
+      kind: ConfigMap
+    - group: ""
+      kind: Pod
+    - group: "autoscaling"
+      kind: HorizontalPodAutoscaler
+    - group: "policy"
+      kind: PodDisruptionBudget
+    - group: "networking.k8s.io"
+      kind: Ingress
+    - group: "networking.k8s.io"
+      kind: NetworkPolicy
+
+  # Sync windows — optional: restrict automated syncs to business hours only.
+  # Uncomment for prod to prevent accidental deploys at 3am.
+  # syncWindows:
+  #   - kind: allow
+  #     schedule: "0 9 * * MON-FRI"
+  #     duration: 10h
+  #     applications: ["*"]
+  #     manualSync: true
+
+  # Orphaned resource monitoring — alert if resources exist in the namespace
+  # that are NOT managed by ArgoCD (e.g. someone ran kubectl apply manually).
+  orphanedResources:
+    warn: true
