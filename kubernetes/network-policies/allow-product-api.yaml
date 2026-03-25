@@ -1,0 +1,86 @@
+# Allow Product API — ingress from storefront and ingress-nginx, egress to
+# PostgreSQL and Redis.
+#
+# Traffic flow:
+#   ingress-nginx → product-api:8080 (external API traffic)
+#   storefront → product-api:8080 (frontend → backend API calls)
+#   product-api → PostgreSQL:5432 (database queries)
+#   product-api → Redis:6379 (cache reads/writes)
+#   product-api → AWS endpoints (SQS publish for order creation)
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-product-api
+  namespace: commerce
+  labels:
+    app.kubernetes.io/part-of: cloudnative-commerce
+    app.kubernetes.io/managed-by: kustomize
+    policy-type: service
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: product-api
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Allow from ingress-nginx controller (external traffic)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+
+    # Allow from storefront (server-side API calls)
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: storefront
+      ports:
+        - protocol: TCP
+          port: 8080
+
+    # Allow from Prometheus scraping metrics
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+
+  egress:
+    # Allow to PostgreSQL (RDS) — port 5432
+    # Using CIDR for RDS since it's outside the cluster (AWS-managed).
+    # In production, replace with the actual RDS endpoint CIDR.
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/16
+      ports:
+        - protocol: TCP
+          port: 5432
+
+    # Allow to Redis (ElastiCache) — port 6379
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/16
+      ports:
+        - protocol: TCP
+          port: 6379
+
+    # Allow to AWS API endpoints (SQS, etc.) — HTTPS
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32  # Block IMDS (metadata service)
+      ports:
+        - protocol: TCP
+          port: 443
