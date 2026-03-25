@@ -1,0 +1,185 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-api
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: product-api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: cloudnative-commerce
+    app.kubernetes.io/managed-by: argocd
+spec:
+  # Replica count is managed by HPA — this is just the initial value.
+  # Kustomize overlays set environment-specific minimums.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: product-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never go below 1 available replica during a rollout.
+      maxUnavailable: 0
+      # Allow one extra pod during rollout (surge) for zero-downtime deploys.
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: product-api
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: cloudnative-commerce
+        # Version label updated by CI on each deploy — used by ArgoCD
+        # to detect drift and by Kyverno to require explicit versioning.
+        app.kubernetes.io/version: latest
+      annotations:
+        # Prometheus scraping — picks up Go runtime metrics + custom metrics
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: product-api
+
+      # Security context — pod level
+      # runAsNonRoot + seccompProfile are required by the 'restricted'
+      # pod security standard applied to the commerce namespace.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      # Anti-affinity — spread pods across nodes and AZs.
+      # Without this, all replicas could land on the same node,
+      # making a node failure a full outage.
+      affinity:
+        podAntiAffinity:
+          # Preferred (soft): try to spread across nodes.
+          # Using preferred instead of required so scheduling doesn't
+          # fail when cluster has fewer nodes than replicas.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: product-api
+                topologyKey: kubernetes.io/hostname
+            - weight: 50
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: product-api
+                # Spread across AZs — EKS labels nodes with this key automatically
+                topologyKey: topology.kubernetes.io/zone
+
+      # Topology spread — more granular than anti-affinity for even distribution
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: product-api
+
+      containers:
+        - name: product-api
+          # Image tag is patched by Kustomize overlays and CI.
+          # Never use :latest in production — always a specific git SHA.
+          image: product-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          # Container-level security context
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          # Resource requests: what the scheduler uses for bin-packing.
+          # Resource limits: hard ceiling — OOMKilled if exceeded.
+          # Always set both. Without requests, Karpenter can't bin-pack correctly.
+          # Without limits, one buggy pod can starve the entire node.
+          resources:
+            requests:
+              cpu: 100m      # 0.1 vCPU — typical for a Go API at low load
+              memory: 128Mi  # Go runtime baseline
+            limits:
+              cpu: 500m      # 0.5 vCPU max — prevent runaway CPU
+              memory: 256Mi  # Tight limit — Go is memory-efficient
+
+          # Environment variables from ConfigMap and Secrets
+          env:
+            - name: APP_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: product-api-config
+                  key: APP_ENV
+            - name: DB_SECRET_ARN
+              valueFrom:
+                configMapKeyRef:
+                  name: product-api-config
+                  key: DB_SECRET_ARN
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: product-api-config
+                  key: REDIS_URL
+            - name: PORT
+              value: "8080"
+            # AWS region for SDK calls (Secrets Manager, etc.)
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: product-api-config
+                  key: AWS_REGION
+
+          # Liveness probe — if this fails, Kubernetes restarts the container.
+          # Use a lightweight endpoint that doesn't call the database.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          # Readiness probe — if this fails, the pod is removed from the Service
+          # endpoints and stops receiving traffic. Can check DB connectivity.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          # Startup probe — gives the app extra time to start before liveness kicks in.
+          # Prevents restart loops during cold starts (e.g. DB schema migration on boot).
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12  # 12 * 5s = 60s max startup time
+            timeoutSeconds: 5
+
+          # Writable temp dir for Go runtime (read-only root FS requires this)
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+      # Graceful shutdown — give in-flight requests time to complete
+      # before the pod is terminated. Match this to your longest request timeout.
+      terminationGracePeriodSeconds: 30

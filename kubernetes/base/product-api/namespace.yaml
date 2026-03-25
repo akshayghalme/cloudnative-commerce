@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: commerce
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    # Kyverno policies target this label — all commerce workloads are governed
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted

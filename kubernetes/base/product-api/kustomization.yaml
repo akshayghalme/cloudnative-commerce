@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Base resources — applied to all environments.
+# Overlays (dev/staging/prod) patch these with environment-specific values.
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - hpa.yaml
+  - pdb.yaml
+
+# Common labels added to all resources in this base.
+# Overlays can add more labels but cannot remove these.
+commonLabels:
+  app.kubernetes.io/part-of: cloudnative-commerce
+  app.kubernetes.io/managed-by: argocd
+
+# Common annotations applied to all resources.
+commonAnnotations:
+  argocd.argoproj.io/managed-by: argocd
