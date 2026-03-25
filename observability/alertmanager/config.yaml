@@ -1,0 +1,127 @@
+# Alertmanager Configuration
+#
+# Routes alerts from Prometheus to the right channel based on severity:
+#   critical → PagerDuty (page on-call) + Slack #incidents
+#   warning  → Slack #alerts (investigate within hours)
+#   info     → Slack #alerts (investigate this week)
+#
+# Alertmanager handles:
+# - Grouping: batches related alerts into one notification (e.g., all product-api alerts)
+# - Deduplication: won't re-notify for the same alert until it resolves
+# - Silencing: temporarily mute known alerts during maintenance windows
+# - Inhibition: if a critical alert fires, suppress related warning/info alerts
+#
+# This config is applied via the kube-prometheus-stack Helm values or
+# directly as a Secret in the monitoring namespace.
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alertmanager-prometheus-kube-prometheus-alertmanager
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: cloudnative-commerce
+type: Opaque
+stringData:
+  alertmanager.yaml: |
+    global:
+      # Default: wait 30s before sending the first notification for a new group.
+      # This allows related alerts to arrive and be grouped together.
+      group_wait: 30s
+      # After the first notification, wait 5m before sending updates.
+      group_interval: 5m
+      # Don't re-notify for the same alert until 4h have passed.
+      repeat_interval: 4h
+      # PagerDuty API URL (use the Events API v2)
+      pagerduty_url: 'https://events.pagerduty.com/v2/enqueue'
+
+    # ─── Route Tree ──────────────────────────────────────────────────
+    route:
+      # Group alerts by service and alertname — one notification per incident
+      group_by: ['alertname', 'service', 'namespace']
+      receiver: slack-alerts
+
+      routes:
+        # Critical alerts → PagerDuty + Slack #incidents
+        # These page on-call and create an incident channel message.
+        - match:
+            severity: critical
+          receiver: pagerduty-critical
+          continue: true  # Also send to Slack
+          group_wait: 10s  # Page faster for critical
+
+        - match:
+            severity: critical
+          receiver: slack-incidents
+
+        # Warning alerts → Slack #alerts only (no page)
+        - match:
+            severity: warning
+          receiver: slack-alerts
+
+        # Info alerts → Slack #alerts (low priority)
+        - match:
+            severity: info
+          receiver: slack-alerts
+          repeat_interval: 24h  # Don't spam for info-level
+
+    # ─── Receivers ───────────────────────────────────────────────────
+    receivers:
+      # Default receiver — catches anything not matched by routes
+      - name: slack-alerts
+        slack_configs:
+          - api_url: 'PLACEHOLDER_SLACK_WEBHOOK_URL'
+            channel: '#alerts'
+            title: '{{ .GroupLabels.alertname }} [{{ .GroupLabels.severity | toUpper }}]'
+            text: |
+              *Service:* {{ .GroupLabels.service }}
+              *Summary:* {{ range .Alerts }}{{ .Annotations.summary }}{{ end }}
+              *Description:* {{ range .Alerts }}{{ .Annotations.description }}{{ end }}
+              {{ if (index .Alerts 0).Annotations.runbook_url }}*Runbook:* {{ (index .Alerts 0).Annotations.runbook_url }}{{ end }}
+            send_resolved: true
+
+      # Critical → PagerDuty
+      - name: pagerduty-critical
+        pagerduty_configs:
+          - service_key: 'PLACEHOLDER_PAGERDUTY_SERVICE_KEY'
+            severity: critical
+            description: '{{ .GroupLabels.alertname }}: {{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+            details:
+              service: '{{ .GroupLabels.service }}'
+              namespace: '{{ .GroupLabels.namespace }}'
+              firing: '{{ .Alerts.Firing | len }}'
+
+      # Critical → Slack #incidents (separate channel for active incidents)
+      - name: slack-incidents
+        slack_configs:
+          - api_url: 'PLACEHOLDER_SLACK_WEBHOOK_URL'
+            channel: '#incidents'
+            title: ':rotating_light: {{ .GroupLabels.alertname }} — {{ .GroupLabels.service }}'
+            text: |
+              *Severity:* CRITICAL
+              *Summary:* {{ range .Alerts }}{{ .Annotations.summary }}{{ end }}
+              *Description:* {{ range .Alerts }}{{ .Annotations.description }}{{ end }}
+              *Runbook:* {{ if (index .Alerts 0).Annotations.runbook_url }}{{ (index .Alerts 0).Annotations.runbook_url }}{{ else }}N/A{{ end }}
+            send_resolved: true
+
+    # ─── Inhibition Rules ────────────────────────────────────────────
+    # If a critical alert fires for a service, suppress warning/info alerts
+    # for the same service. This prevents notification storms.
+    inhibit_rules:
+      - source_match:
+          severity: critical
+        target_match:
+          severity: warning
+        equal: ['service', 'namespace']
+
+      - source_match:
+          severity: critical
+        target_match:
+          severity: info
+        equal: ['service', 'namespace']
+
+      - source_match:
+          severity: warning
+        target_match:
+          severity: info
+        equal: ['service', 'namespace']
