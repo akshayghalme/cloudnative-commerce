@@ -1,0 +1,95 @@
+# Promtail Helm values
+# Chart: grafana/promtail v6.16.6
+# Install: helm install promtail grafana/promtail -n monitoring -f values-promtail.yaml
+#
+# Promtail is the log collection agent — runs as a DaemonSet on every node,
+# tails container log files from /var/log/pods, and ships them to Loki.
+#
+# How it works:
+# 1. Kubelet writes container stdout/stderr to /var/log/pods/<ns>_<pod>_<uid>/<container>/0.log
+# 2. Promtail discovers these files via the Kubernetes API
+# 3. Promtail reads the log lines, adds labels (namespace, pod, container)
+# 4. Promtail pushes labeled log streams to Loki's push API
+#
+# Labels are the key to efficient queries in Loki. More labels = more streams
+# = more index entries. Keep labels low-cardinality (namespace, app, container).
+# Never use high-cardinality fields as labels (request ID, user ID, trace ID).
+
+# ─── Loki endpoint ────────────────────────────────────────────────────
+config:
+  clients:
+    - url: http://loki-gateway.monitoring:80/loki/api/v1/push
+      # Batch settings — Promtail batches log lines before sending to
+      # reduce HTTP overhead. 1MB or 1s, whichever comes first.
+      batchwait: 1s
+      batchsize: 1048576  # 1 MB
+
+  # ─── Pipeline stages ─────────────────────────────────────────────────
+  # Pipeline stages transform log lines before sending to Loki.
+  # These stages extract structured data from JSON logs and add labels.
+  snippets:
+    pipelineStages:
+      # Stage 1: Parse Docker/CRI log format
+      # Container runtimes wrap logs in a standard format:
+      # 2024-01-01T00:00:00.000000000Z stdout F {"level":"info","msg":"..."}
+      - cri: {}
+
+      # Stage 2: Try to parse JSON log lines (our services log as JSON)
+      # If the log line is JSON, extract the `level` field as a label.
+      # This enables queries like: {app="product-api"} | level="error"
+      - json:
+          expressions:
+            level: level
+            msg: msg
+            status: status
+
+      # Stage 3: Add extracted `level` as a label (if present)
+      # Only promote `level` — it's low-cardinality (debug, info, warn, error).
+      # DO NOT promote msg, status, or other high-cardinality fields.
+      - labels:
+          level:
+
+      # Stage 4: Drop debug logs in production namespaces
+      # Debug logs are high-volume and rarely useful in aggregated logging.
+      # Developers can still see them via kubectl logs.
+      - match:
+          selector: '{namespace="commerce"} |= "debug"'
+          stages:
+            - drop:
+                expression: ".*"
+                older_than: 1h
+
+  # ─── Scrape configs ─────────────────────────────────────────────────
+  # Default scrape config discovers all pods via Kubernetes API.
+  # Promtail automatically adds these labels from pod metadata:
+  # - __meta_kubernetes_namespace → namespace
+  # - __meta_kubernetes_pod_name → pod
+  # - __meta_kubernetes_pod_container_name → container
+  # - __meta_kubernetes_pod_label_* → app labels
+
+# ─── Resources ─────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# ─── Tolerations ───────────────────────────────────────────────────────
+# Run on ALL nodes including tainted ones — we want logs from every node.
+tolerations:
+  - operator: Exists
+
+# ─── Service Monitor ──────────────────────────────────────────────────
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
+
+# ─── Security Context ────────────────────────────────────────────────
+# Promtail needs to read host log files — requires privileged access
+# to /var/log. This is an accepted exception to our disallow-privileged
+# Kyverno policy (Promtail runs in the monitoring namespace, which is excluded).
+containerSecurityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
