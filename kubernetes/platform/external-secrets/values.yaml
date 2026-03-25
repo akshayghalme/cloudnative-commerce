@@ -1,0 +1,64 @@
+# External Secrets Operator (ESO) Helm values
+# Chart: external-secrets/external-secrets v0.12.1
+# Install: helm install external-secrets external-secrets/external-secrets -n external-secrets --create-namespace -f values.yaml
+#
+# ESO syncs secrets from external providers (AWS Secrets Manager, SSM Parameter
+# Store, HashiCorp Vault) into Kubernetes Secrets. This means:
+# - No secrets in Git (not even encrypted — no SOPS, no sealed-secrets)
+# - Secret rotation in AWS automatically propagates to pods
+# - Single source of truth for secrets is AWS Secrets Manager
+#
+# Flow: ExternalSecret CRD → ESO reads from AWS Secrets Manager → creates K8s Secret
+
+replicaCount: 2  # HA — if ESO is down, new ExternalSecrets won't sync
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# Webhook — validates ExternalSecret CRDs
+webhook:
+  replicaCount: 2
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+# cert-controller — manages webhook TLS certificates
+certController:
+  replicaCount: 2
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+# Prometheus metrics
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
+
+# Security context
+securityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
