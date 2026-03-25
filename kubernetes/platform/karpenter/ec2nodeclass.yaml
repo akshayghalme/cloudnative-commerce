@@ -1,0 +1,65 @@
+# EC2NodeClass — AWS-specific node configuration for Karpenter.
+# This tells Karpenter HOW to launch EC2 instances: which AMI family,
+# subnets, security groups, and instance profile to use.
+#
+# Karpenter v1 API (v1.x) — replaces the deprecated AWSNodeTemplate.
+
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  # EKS-optimized Amazon Linux 2023 — Karpenter auto-discovers the latest
+  # AMI for the cluster's Kubernetes version. AL2023 is the recommended
+  # AMI family for EKS 1.30+ (replaces AL2).
+  amiSelectorTerms:
+    - alias: al2023@latest
+
+  # Karpenter discovers subnets by tags. The VPC module tags private subnets
+  # with karpenter.sh/discovery: <cluster-name>. Only private subnets —
+  # nodes should never be internet-facing.
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: commerce-dev
+        kubernetes.io/role/internal-elb: "1"
+
+  # Security group discovery — same tag-based approach. The EKS module
+  # creates a node security group tagged for Karpenter discovery.
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: commerce-dev
+
+  # IAM instance profile for Karpenter-launched nodes.
+  # This is NOT an IRSA role — it's the EC2 instance profile that gives
+  # the node permission to join the EKS cluster and pull ECR images.
+  # Created by the Karpenter Terraform module or IAM module.
+  role: commerce-dev-karpenter-node
+
+  # Root EBS volume — 50 GiB gp3 matches the managed node group config.
+  # gp3 gives 3000 IOPS baseline (vs gp2's size-dependent IOPS).
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 50Gi
+        volumeType: gp3
+        iops: 3000
+        throughput: 125
+        encrypted: true
+        deleteOnTermination: true
+
+  # User data — Karpenter injects the EKS bootstrap script automatically.
+  # Only add custom userData if you need extra packages or config.
+
+  # Metadata options — IMDSv2 required (security best practice).
+  # IMDSv1 is vulnerable to SSRF attacks; IMDSv2 requires a PUT token.
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 2
+    httpTokens: required
+
+  # Tags applied to all EC2 instances launched by Karpenter.
+  tags:
+    Environment: dev
+    ManagedBy: karpenter
+    Project: cloudnative-commerce
