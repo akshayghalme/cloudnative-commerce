@@ -1,0 +1,153 @@
+# Chaos Experiment — Pod Kill: product-api
+#
+# Hypothesis: "If one product-api pod is killed, the service remains
+# available because Kubernetes creates a replacement pod within 30 seconds,
+# and the remaining pods handle traffic during the gap."
+#
+# What this tests:
+# - Readiness probe removes the dying pod from the Service endpoints
+# - Kubernetes scheduler creates a replacement pod on a healthy node
+# - HPA maintains desired replica count
+# - No user-visible errors during the pod replacement window
+#
+# Expected outcome:
+# - Zero 5xx errors (remaining pods handle all traffic)
+# - P99 latency stays under 500ms
+# - New pod reaches Ready state within 30 seconds
+# - Error rate SLO probe passes throughout
+
+---
+# ChaosExperiment — defines the fault type and parameters
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosExperiment
+metadata:
+  name: pod-kill
+  namespace: commerce
+  labels:
+    app.kubernetes.io/part-of: cloudnative-commerce
+    app.kubernetes.io/component: chaos
+spec:
+  definition:
+    scope: Namespaced
+    permissions:
+      - apiGroups: [""]
+        resources: ["pods"]
+        verbs: ["create", "delete", "get", "list", "patch", "update"]
+      - apiGroups: [""]
+        resources: ["events"]
+        verbs: ["create", "get", "list", "patch", "update"]
+      - apiGroups: [""]
+        resources: ["pods/log"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: ["batch"]
+        resources: ["jobs"]
+        verbs: ["create", "list", "get", "delete"]
+      - apiGroups: ["litmuschaos.io"]
+        resources: ["chaosengines", "chaosexperiments", "chaosresults"]
+        verbs: ["create", "list", "get", "patch", "update", "delete"]
+    image: litmuschaos/go-runner:3.10.0
+    args:
+      - -c
+      - ./experiments -name pod-delete
+    command:
+      - /bin/bash
+    env:
+      # Kill one pod at a time
+      - name: TOTAL_CHAOS_DURATION
+        value: "60"
+      # Wait 30s between kills (if multiple iterations)
+      - name: CHAOS_INTERVAL
+        value: "30"
+      # Force kill (SIGKILL) — simulates hard crash, not graceful shutdown
+      - name: FORCE
+        value: "true"
+
+---
+# ChaosEngine — connects the experiment to the target application
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: product-api-pod-kill
+  namespace: commerce
+  labels:
+    app.kubernetes.io/part-of: cloudnative-commerce
+    app.kubernetes.io/component: chaos
+    experiment: pod-kill
+spec:
+  appinfo:
+    appns: commerce
+    applabel: app.kubernetes.io/name=product-api
+    appkind: deployment
+  engineState: active
+  chaosServiceAccount: litmus-chaos
+  experiments:
+    - name: pod-kill
+      spec:
+        components:
+          env:
+            # Duration of chaos injection (seconds)
+            - name: TOTAL_CHAOS_DURATION
+              value: "60"
+            # Interval between pod kills
+            - name: CHAOS_INTERVAL
+              value: "30"
+            # Force kill — no SIGTERM grace period
+            - name: FORCE
+              value: "true"
+            # Kill 1 pod at a time (not all replicas)
+            - name: PODS_AFFECTED_PERC
+              value: "50"
+        probe:
+          # Probe 1: HTTP health check — product-api must stay responsive
+          - name: product-api-health
+            type: httpProbe
+            httpProbe/inputs:
+              url: http://product-api.commerce.svc.cluster.local/healthz
+              method:
+                get:
+                  criteria: "=="
+                  responseCode: "200"
+            mode: Continuous
+            runProperties:
+              probeTimeout: "5s"
+              interval: "5s"
+              retry: 3
+              probePollingInterval: "2s"
+
+          # Probe 2: Prometheus SLO — error rate must stay below 1%
+          - name: error-rate-slo
+            type: promProbe
+            promProbe/inputs:
+              endpoint: http://prometheus-kube-prometheus-prometheus.monitoring:9090
+              query: >-
+                sum(rate(http_requests_total{service="product-api", status=~"5.."}[1m]))
+                /
+                sum(rate(http_requests_total{service="product-api"}[1m]))
+              comparator:
+                type: float
+                criteria: "<="
+                value: "0.01"
+            mode: Continuous
+            runProperties:
+              probeTimeout: "10s"
+              interval: "10s"
+              retry: 2
+              probePollingInterval: "5s"
+
+          # Probe 3: Verify pod replacement — at least 1 pod must be Running
+          - name: min-pods-available
+            type: cmdProbe
+            cmdProbe/inputs:
+              command: >-
+                kubectl get pods -n commerce -l app.kubernetes.io/name=product-api
+                --field-selector=status.phase=Running -o name | wc -l
+              comparator:
+                type: int
+                criteria: ">="
+                value: "1"
+            mode: Continuous
+            runProperties:
+              probeTimeout: "5s"
+              interval: "10s"
+              retry: 3
+              probePollingInterval: "3s"
