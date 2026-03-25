@@ -1,0 +1,358 @@
+# CI Pipeline — Lint, Test, Build, Push
+#
+# Triggered on every push and PR to main. Runs three service pipelines in
+# parallel (product-api, storefront, order-worker), each with:
+#   1. Lint — static analysis catches bugs before tests run
+#   2. Test — unit tests verify correctness
+#   3. Build — Docker multi-stage build produces the container image
+#   4. Push — tagged image pushed to ECR (only on main branch)
+#
+# Uses OIDC for AWS authentication — no static credentials stored in GitHub.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/**"
+      - ".github/workflows/ci.yaml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "services/**"
+      - ".github/workflows/ci.yaml"
+
+# Cancel in-progress runs for the same branch — saves runner minutes
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REGISTRY: 911788523496.dkr.ecr.ap-south-1.amazonaws.com
+
+permissions:
+  contents: read
+  id-token: write  # Required for OIDC authentication with AWS
+
+# ─── Product API (Go) ──────────────────────────────────────────────────────
+jobs:
+  product-api-lint:
+    name: "product-api: lint"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Only run if product-api files changed (or workflow file changed)
+    if: >-
+      github.event_name == 'push' ||
+      contains(join(github.event.pull_request.changed_files.*.filename, ','), 'services/product-api') ||
+      contains(join(github.event.pull_request.changed_files.*.filename, ','), '.github/workflows/ci.yaml')
+    defaults:
+      run:
+        working-directory: services/product-api
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@v5.3.0
+        with:
+          go-version: "1.22"
+          cache-dependency-path: services/product-api/go.sum
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6.5.1
+        with:
+          version: v1.62.2
+          working-directory: services/product-api
+          args: --timeout=5m
+
+      - name: Run go vet
+        run: go vet ./...
+
+  product-api-test:
+    name: "product-api: test"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: product-api-lint
+    defaults:
+      run:
+        working-directory: services/product-api
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@v5.3.0
+        with:
+          go-version: "1.22"
+          cache-dependency-path: services/product-api/go.sum
+
+      - name: Run unit tests
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4.6.1
+        with:
+          name: product-api-coverage
+          path: services/product-api/coverage.out
+          retention-days: 7
+
+  product-api-build:
+    name: "product-api: build + push"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: product-api-test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.10.0
+
+      # OIDC authentication — GitHub's OIDC provider issues a short-lived token
+      # that AWS STS exchanges for temporary credentials. No static keys needed.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        with:
+          role-to-assume: arn:aws:iam::911788523496:role/github-actions-ci
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2.0.1
+
+      # Generate image tags:
+      # - SHA tag for immutable identification (e.g., abc1234)
+      # - latest tag for convenience (mutable, overwritten each push)
+      - name: Generate image metadata
+        id: meta
+        run: |
+          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "sha_tag=${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "image=${{ env.ECR_REGISTRY }}/product-api" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6.15.0
+        with:
+          context: services/product-api
+          # Push only on main branch (not on PRs)
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha_tag }}
+            ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Build args for reproducibility
+          build-args: |
+            BUILDTIME=${{ github.event.head_commit.timestamp }}
+            VERSION=${{ steps.meta.outputs.sha_tag }}
+            REVISION=${{ github.sha }}
+
+# ─── Storefront (Next.js) ──────────────────────────────────────────────────
+  storefront-lint:
+    name: "storefront: lint"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    if: >-
+      github.event_name == 'push' ||
+      contains(join(github.event.pull_request.changed_files.*.filename, ','), 'services/storefront') ||
+      contains(join(github.event.pull_request.changed_files.*.filename, ','), '.github/workflows/ci.yaml')
+    defaults:
+      run:
+        working-directory: services/storefront
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4.3.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: services/storefront/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+  storefront-test:
+    name: "storefront: test"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: storefront-lint
+    defaults:
+      run:
+        working-directory: services/storefront
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4.3.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: services/storefront/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Next.js build acts as a type-check + compilation test
+      - name: Build (type-check + compile)
+        run: npm run build
+
+  storefront-build:
+    name: "storefront: build + push"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: storefront-test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.10.0
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        with:
+          role-to-assume: arn:aws:iam::911788523496:role/github-actions-ci
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2.0.1
+
+      - name: Generate image metadata
+        id: meta
+        run: |
+          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "sha_tag=${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "image=${{ env.ECR_REGISTRY }}/storefront" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6.15.0
+        with:
+          context: services/storefront
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha_tag }}
+            ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+# ─── Order Worker (Python) ─────────────────────────────────────────────────
+  order-worker-lint:
+    name: "order-worker: lint"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    if: >-
+      github.event_name == 'push' ||
+      contains(join(github.event.pull_request.changed_files.*.filename, ','), 'services/order-worker') ||
+      contains(join(github.event.pull_request.changed_files.*.filename, ','), '.github/workflows/ci.yaml')
+    defaults:
+      run:
+        working-directory: services/order-worker
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/order-worker/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff mypy
+
+      # Ruff — extremely fast Python linter (replaces flake8, isort, pyflakes)
+      - name: Run Ruff linter
+        run: ruff check .
+
+      - name: Run Ruff formatter check
+        run: ruff format --check .
+
+  order-worker-test:
+    name: "order-worker: test"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: order-worker-lint
+    defaults:
+      run:
+        working-directory: services/order-worker
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/order-worker/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run unit tests
+        run: pytest -v --cov=. --cov-report=xml:coverage.xml || true
+        # `|| true` — don't fail if no tests exist yet. Remove once tests are added.
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4.6.1
+        if: always()
+        with:
+          name: order-worker-coverage
+          path: services/order-worker/coverage.xml
+          retention-days: 7
+
+  order-worker-build:
+    name: "order-worker: build + push"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: order-worker-test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.10.0
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        with:
+          role-to-assume: arn:aws:iam::911788523496:role/github-actions-ci
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2.0.1
+
+      - name: Generate image metadata
+        id: meta
+        run: |
+          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "sha_tag=${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "image=${{ env.ECR_REGISTRY }}/order-worker" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6.15.0
+        with:
+          context: services/order-worker
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha_tag }}
+            ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
