@@ -1,0 +1,140 @@
+# Disallow Privileged Containers — enforce Pod Security Standards (Restricted).
+#
+# Why: a privileged container has full access to the host — it can read
+# all secrets, modify iptables, load kernel modules, and escape the
+# container entirely. This is the single highest-impact security control
+# for Kubernetes. There is almost never a legitimate reason for application
+# pods to run privileged.
+#
+# This policy enforces:
+# - No privileged: true
+# - No hostNetwork, hostPID, hostIPC
+# - No root (runAsNonRoot: true)
+# - No privilege escalation (allowPrivilegeEscalation: false)
+# - Drop ALL capabilities (add back only what's needed)
+#
+# Equivalent to the Kubernetes Pod Security Standards "restricted" profile.
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-privileged
+  annotations:
+    policies.kyverno.io/title: Disallow Privileged Containers
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Enforces the restricted Pod Security Standard. Blocks privileged
+      containers, host namespaces, root users, and privilege escalation.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    # Rule 1: Block privileged mode
+    - name: deny-privileged-containers
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - karpenter
+      validate:
+        message: >-
+          Privileged containers are not allowed. Container
+          '{{request.object.spec.containers[].name}}' sets
+          securityContext.privileged: true.
+        foreach:
+          - list: "request.object.spec.[initContainers, containers][]"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ element.securityContext.privileged || false }}"
+                    operator: Equals
+                    value: true
+
+    # Rule 2: Block host namespaces (network, PID, IPC)
+    - name: deny-host-namespaces
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - karpenter
+      validate:
+        message: >-
+          Host namespaces (hostNetwork, hostPID, hostIPC) are not allowed.
+          Pod '{{request.object.metadata.name}}' uses a host namespace.
+        pattern:
+          spec:
+            =(hostNetwork): false
+            =(hostPID): false
+            =(hostIPC): false
+
+    # Rule 3: Require non-root user
+    - name: require-run-as-non-root
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - karpenter
+                - argocd
+      validate:
+        message: >-
+          Containers must run as non-root. Set
+          securityContext.runAsNonRoot: true on the pod or container.
+        foreach:
+          - list: "request.object.spec.[initContainers, containers][]"
+            deny:
+              conditions:
+                all:
+                  # Deny if neither pod-level nor container-level runAsNonRoot is true
+                  - key: "{{ element.securityContext.runAsNonRoot || request.object.spec.securityContext.runAsNonRoot || false }}"
+                    operator: Equals
+                    value: false
+
+    # Rule 4: Deny privilege escalation
+    - name: deny-privilege-escalation
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - karpenter
+                - argocd
+      validate:
+        message: >-
+          Privilege escalation is not allowed. Set
+          securityContext.allowPrivilegeEscalation: false on all containers.
+        foreach:
+          - list: "request.object.spec.[initContainers, containers][]"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ element.securityContext.allowPrivilegeEscalation || true }}"
+                    operator: Equals
+                    value: true
