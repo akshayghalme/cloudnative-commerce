@@ -184,6 +184,18 @@ tf-apply: ## Run terraform apply in dev environment (requires confirmation)
 tf-destroy: ## Destroy dev environment (DESTRUCTIVE — prompts for confirmation)
 	cd terraform/environments/dev && terraform destroy
 
+tg-init: ## Run terragrunt init in dev environment
+	cd terraform/environments/dev && terragrunt init
+
+tg-plan: ## Run terragrunt plan in dev environment
+	cd terraform/environments/dev && terragrunt plan
+
+tg-apply: ## Run terragrunt apply in dev environment (requires confirmation)
+	cd terraform/environments/dev && terragrunt apply
+
+tg-destroy: ## Destroy dev environment via Terragrunt (DESTRUCTIVE)
+	cd terraform/environments/dev && terragrunt destroy
+
 # ─── Pre-commit ───────────────────────────────────────────────────────────────
 
 pre-commit-install: ## Install pre-commit hooks into .git/hooks
