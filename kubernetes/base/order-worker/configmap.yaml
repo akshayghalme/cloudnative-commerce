@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-worker-config
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: order-worker
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: cloudnative-commerce
+data:
+  APP_ENV: "production"
+  AWS_REGION: "ap-south-1"
+  # Internal product-api URL — worker calls API to update order status
+  PRODUCT_API_URL: "http://product-api.commerce.svc.cluster.local"
+  # Placeholders patched by overlays with real SQS URLs from Terraform outputs
+  SQS_QUEUE_URL: "PLACEHOLDER_SQS_QUEUE_URL"
+  SQS_DLQ_URL: "PLACEHOLDER_SQS_DLQ_URL"
